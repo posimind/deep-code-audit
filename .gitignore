@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# audit run outputs land under the target repo, never here — but guard anyway
+.deep-code-audit/
