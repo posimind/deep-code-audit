@@ -30,6 +30,9 @@ TRISTATE = {"met", "unmet", "unknown"}
 VERDICTS = {"confirmed", "false_positive"}
 RUBRICS = {"full", "light"}
 FULL_CRITERIA = ("does_this", "reachable", "harmful", "no_guard", "survives_rebuttal")
+CRITERION_MARK = {"does_this": "①", "reachable": "②", "harmful": "③",
+                  "no_guard": "④", "survives_rebuttal": "⑤"}
+ENV_KEYS = ("os_targets", "arch_targets", "concurrency_model", "runtime", "exposure")
 
 
 class ValidationError(Exception):
@@ -225,6 +228,23 @@ def validate_result(r, i):
          f"{tag}: light 룰브릭인데 severity_final={r['severity_final']} — "
          f"격상하려면 full 재채점 필요")
 
+    # 규칙 6~8: full 룰브릭의 met 판정 증거 필드(light 면제).
+    if r["rubric"] == "full":
+        if crit.get("reachable") == "met":
+            _req(isinstance(r.get("entry_path"), str) and r["entry_path"].strip(),
+                 f"{tag}: reachable=met 인데 entry_path 없음(규칙 6) — "
+                 f"진입점→결함 라인 호출 경로를 기록해야 met")
+        if crit.get("no_guard") == "met":
+            gs = r.get("guard_scan")
+            _req(isinstance(gs, list) and gs
+                 and all(isinstance(x, str) and x.strip() for x in gs),
+                 f"{tag}: no_guard=met 인데 guard_scan 없음(규칙 7) — "
+                 f"실제 확인한 방어 표면 목록을 기록해야 met")
+        if crit.get("survives_rebuttal") == "met":
+            _req(isinstance(r.get("rebuttal"), str) and r["rebuttal"].strip(),
+                 f"{tag}: survives_rebuttal=met 인데 rebuttal 없음(규칙 8) — "
+                 f"최강 반론과 그 실패 이유를 기록해야 met")
+
     # 판정 일관성.
     if r["verdict"] == "confirmed":
         _req(not has_unmet,
@@ -241,6 +261,19 @@ def validate_result(r, i):
     else:  # false_positive
         _req(isinstance(r.get("reject_reason"), str) and r["reject_reason"].strip(),
              f"{tag}: false_positive 는 reject_reason 필수")
+        if has_unmet:
+            # 규칙 4 확장: 게이트 기각은 어느 기준이 unmet 인지 명시(unmet 오판=미탐 방지).
+            rr = r["reject_reason"]
+            unmet_keys = [k for k, v in crit.items() if v == "unmet"]
+            _req(any(k in rr or CRITERION_MARK.get(k, "") in rr for k in unmet_keys),
+                 f"{tag}: 게이트 기각인데 reject_reason 이 unmet 기준을 명시하지 않음 — "
+                 f"unmet 기준({unmet_keys})의 키 이름 또는 ①~⑤ 표기와 반증 근거를 인용")
+        elif r["rubric"] == "full":
+            # 규칙 9: 임계 미달 기각 전 unknown 해소 시도 이력 필수.
+            ap = r.get("appraisal")
+            _req(isinstance(ap, list) and len(ap) > 0,
+                 f"{tag}: 임계 미달 기각(unmet 없는 full false_positive)인데 appraisal "
+                 f"비어 있음(규칙 9) — 기각 전 unknown 기준의 해소 시도 이력을 남겨야 함")
 
 
 def validate_verified(obj):
@@ -501,11 +534,39 @@ def cmd_merge(args):
     return 1
 
 
+# --- brief.environment 형태 검증 (§1, 존재 시에만) --------------------------
+
+def validate_environment(env):
+    _req(isinstance(env, dict), "brief.environment 객체 필요")
+    extra = set(env) - set(ENV_KEYS)
+    _req(not extra, f"brief.environment 허용 밖 키: {sorted(extra)}")
+    for k in ENV_KEYS:
+        _req(k in env, f"brief.environment.{k} 필요 — 근거를 못 찾으면 "
+                       f'value="unknown" 으로 남기고 evidence 에 확인 시도 위치 기록')
+        item = env[k]
+        _req(isinstance(item, dict), f"brief.environment.{k} 객체(value+evidence) 필요")
+        v = item.get("value")
+        v_ok = (isinstance(v, str) and v.strip()) or (
+            isinstance(v, list) and v
+            and all(isinstance(x, str) and x.strip() for x in v))
+        _req(v_ok, f"brief.environment.{k}.value 문자열 또는 문자열 배열 필요")
+        _req(isinstance(item.get("evidence"), str) and item["evidence"].strip(),
+             f"brief.environment.{k}.evidence 필요(단정의 근거 위치, "
+             f"unknown 이면 확인 시도한 위치)")
+
+
 # --- 커맨드: init-state / set-state / log-issue ----------------------------
 
 def cmd_init_state(args):
     run_dir = args.run_dir
     gj = load_json(args.groups_file or os.path.join(run_dir, "groups.json"))
+    env = (gj.get("brief") or {}).get("environment")
+    if env is not None:
+        try:
+            validate_environment(env)
+        except ValidationError as e:
+            sys.stderr.write(f"[init-state:FAIL] {e}\n")
+            raise SystemExit(2)
     gids = [str(g["group_id"]) for g in gj["groups"]]
     hr = {str(g["group_id"]) for g in gj["groups"] if g.get("high_risk")}
     st = {

@@ -99,7 +99,12 @@ description: >-
      비교 가능성을 깨므로 동의 없이 금지.
 3. `.deep-code-audit/` 이 대상의 VCS에 오염되지 않도록, 없으면 대상 루트 `.gitignore`
    에 `.deep-code-audit/` 추가를 안내(또는 사용자 동의 시 직접 추가).
-4. 이후 각 단계 시작 전 `state.json` 을 확인해 **완료된 단계·그룹은 스킵**한다.
+4. **드리프트 가드 기록**: 대상 루트가 git 저장소면 `git rev-parse HEAD` 와
+   `git status --porcelain` 요약(변경 파일 목록)을 `$RUN/preflight/vcs.json` 에 기록한다
+   (mode.json 과 같은 비스키마 정보 파일 — 오케스트레이터가 직접 쓴다). 런은 수 시간
+   걸릴 수 있고, 도중에 대상이 수정되면 헌터가 본 코드와 검증자가 볼 코드가 어긋난다 —
+   Stage 3 진입 전 재확인에 쓰인다. **비git 대상은 기록을 생략**하고 그 사실만 남긴다.
+5. 이후 각 단계 시작 전 `state.json` 을 확인해 **완료된 단계·그룹은 스킵**한다.
 
 ### 0c. 카나리 스폰과 모드 기록 (run 디렉터리 확정 후)
 
@@ -148,6 +153,21 @@ README·매니페스트(package.json, Cargo.toml, pom.xml, go.mod, pyproject.tom
   (a) 고위험 영역을 더 좁혀 재작성하거나 (b) 전면 2차 패스 비용을 사용자에게 고지하고
   의도적으로 진행하거나, 어느 쪽인지 명시적으로 선택하라(순수 시스템 저장소처럼 정말
   전부 고위험인 프로젝트는 (b)가 정답일 수 있다).
+- `environment`: **실행 환경 사실 5항목** — `os_targets`(대상 OS), `arch_targets`
+  (아키텍처), `concurrency_model`(동시성 모델), `runtime`(언어 런타임·버전 범위),
+  `exposure`(노출 모델: 공용 수신/내부 전용/CLI 등). 각 항목은
+  `{"value": ..., "evidence": "<근거 위치>"}` 쌍(스키마 §1 — init-state 가 형태 검증).
+  이 사실들이 없으면 검증 단계의 reachable/harmful 판정이 unknown 을 양산해 오탐·미탐
+  양쪽으로 샌다. **근거를 못 찾으면 단정하지 말고 `value: "unknown"`** — 잘못된
+  "Linux 전용" 단정은 헌터가 Windows 경로를 통째로 안 보게 만드는 체계적 미탐 채널이라
+  없느니만 못하다(evidence 에 확인 시도한 위치를 남긴다). 판정 근거 소스는 브리프 작성
+  중 이미 읽는 파일 옆에 있다:
+  - CI 워크플로 매트릭스(`.github/workflows/`), Dockerfile / docker-compose
+  - Cargo.toml·`.cargo/config.toml`·build.rs / go.mod·`//go:build` 태그 /
+    pyproject classifiers / package.json `engines`
+  - 조건부 컴파일·플랫폼 분기 인벤토리: `#ifdef _WIN32`·`cfg(target_os)`·`runtime.GOOS`
+    grep(분기의 존재 자체가 멀티 플랫폼 신호)
+  - README 설치·배포 절
 
 키워드 스크립트를 쓰지 않는 이유: 휴리스틱 오분류가 렌즈 가중치를 틀어 미탐으로 직결되고,
 문서를 직접 읽는 편이 정확하고 저렴하다.
@@ -164,8 +184,10 @@ python3 $SKILL/scripts/select_targets.py <대상루트> --out $RUN/targets.json 
 브리프를 쓰며 이미 README·매니페스트를 읽은 상태이므로, `targets.json` 의 `excluded`·
 `low`·`excluded_files`(크기 가드 배제)를 **검토**하라. 패턴 분류 오류는 심각도 게이트로
 직결된다 — `low` 오분류는 critical을 minor로 기계 강등시키고(테스트 프레임워크가 제품인
-저장소 등), `exclude` 오분류는 스캔 자체를 누락시킨다. 프로젝트 성격과 어긋나는 항목이
-있으면 `--include`/`--exclude` 오버라이드로 교정해 **1b를 1회 재실행**한다.
+저장소 등), `exclude` 오분류는 스캔 자체를 누락시킨다. 브리프 작성 중 파악한 **관례 밖
+테스트 경로**(`spec/`, `e2e/`, golden 파일 디렉터리 등)가 `low` 로 분류됐는지도 대조하라.
+프로젝트 성격과 어긋나는 항목이 있으면 `--include`/`--exclude` 오버라이드로 교정해
+**1b를 1회 재실행**한다.
 
 ### 1d. 그룹핑
 
@@ -270,6 +292,12 @@ python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
 ---
 
 ## Stage 3 — 적대적 검증 (그룹별, 새 컨텍스트)
+
+**진입 전 드리프트 확인(재개로 Stage 3 에 들어올 때도 동일)**: `$RUN/preflight/vcs.json`
+이 있으면 `git rev-parse HEAD`·`git status --porcelain` 을 재실행해 대조한다. 달라졌으면
+헌터가 본 코드와 검증자가 볼 코드가 어긋난 것이다 — 위치·라인이 어긋난 채 검증하면
+오탐·미탐 이전에 **판정 자체가 무의미**해진다. 차단이 아니라 고지다: 사용자에게 알리고
+`log-issue` 로 기록한 뒤 진행 여부를 확인한다. 비git 대상(vcs.json 없음)은 생략.
 
 ### 3a. claim 발췌
 

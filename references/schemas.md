@@ -60,7 +60,14 @@
     "high_risk_areas": [
       {"path": "api/", "reason": "외부 HTTP 진입점"},
       {"path": "billing/charge.py", "reason": "결제 실행 경로"}
-    ]
+    ],
+    "environment": {
+      "os_targets":        {"value": ["linux"], "evidence": ".github/workflows/ci.yml 매트릭스가 ubuntu만, Dockerfile FROM debian"},
+      "arch_targets":      {"value": ["x86_64", "aarch64"], "evidence": "CI 매트릭스 + .cargo/config.toml 타깃"},
+      "concurrency_model": {"value": "tokio 멀티스레드 런타임", "evidence": "main.rs #[tokio::main(flavor=multi_thread)]"},
+      "runtime":           {"value": "Python 3.9+", "evidence": "pyproject requires-python"},
+      "exposure":          {"value": "unknown", "evidence": "README·docker-compose 에 배포 형태 기술 없음(확인 시도)"}
+    }
   },
   "excluded": ["vendor/", "dist/"],
   "excluded_files": [
@@ -86,6 +93,13 @@
 
 - `brief`는 오케스트레이터가 `brief.json`으로 먼저 기록한 것을 `group_by_lines.py`가
   병합한 것이다. `lens_priority`는 5개 렌즈의 부분·전체 순열.
+- `brief.environment`: **선택 필드**(구 런과 하위 호환 — 없으면 검사하지 않는다).
+  존재하면 `os_targets`/`arch_targets`/`concurrency_model`/`runtime`/`exposure` 5항목을
+  모두 갖추고, 각 항목은 `value`(문자열 또는 문자열 배열) + `evidence`(비어 있지 않은
+  문자열) 쌍이어야 한다 — `validate_output.py init-state` 가 형태를 검증한다. 근거를
+  못 찾은 항목은 단정하지 말고 `value: "unknown"` 으로 남기며, 이때 `evidence` 에는
+  확인을 시도한 위치를 적는다. 헌터의 가설 가지치기는 evidence 로 확정된 항목으로만
+  허용된다(오단정 = 체계적 미탐 채널).
 - `excluded`: 감사 범위 투명성을 위한 배제 요약(디렉터리/패턴 단위).
 - `excluded_files`: 크기 가드 등으로 개별 배제된 파일 — 오배제 사후 확인용.
 - 각 그룹의 `files[].class`는 `core | low`. `high_risk`는 브리프 고위험 영역과의
@@ -175,6 +189,9 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
                    "no_guard": "met", "survives_rebuttal": "met"},
       "severity_final": "critical",
       "failure_scenario": "GET /search?q=' OR '1'='1 요청 시 WHERE 절이 항상 참이 되어 전체 테이블이 유출된다.",
+      "entry_path": "main → route /search → handle_search:42 → cursor.execute:47",
+      "guard_scan": ["app.py 미들웨어 체인", "nginx.conf", "handle_search 호출부 2곳"],
+      "rebuttal": "최강 반론: ORM 계층이 이스케이프할 것 — 실패: 이 경로는 raw cursor 직접 사용, ORM 미경유(db/conn.py:12)",
       "appraisal": [
         {"item": "상류 WAF/미들웨어 존재 여부", "evidence": "app.py 미들웨어 체인에 입력 필터 없음 확인"}
       ],
@@ -189,6 +206,7 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
       "rederivation": "claim만 보고 재도출: reflected 파라미터가 응답에 들어가는 것으로 보였음",
       "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
                    "no_guard": "unmet", "survives_rebuttal": "unmet"},
+      "entry_path": "main → route /echo → render:88",
       "severity_final": "major",
       "reject_reason": "기준 ④ unmet 확정 — middleware/auth.py:30에서 동일 입력을 이미 정규화함 (게이트: 점수 무관 배제)"
     }
@@ -201,26 +219,50 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
 
 - `verdict`: `confirmed | false_positive`.
 - `rubric`: `full`(critical/major, 5기준) | `light`(minor, ①③ + 명백 방어 확인).
-- `score`: **met 개수 정수**. full 0~5, light 0~2. "5/5" 같은 표기는 보고서
-  렌더링에서만 만든다.
+- `score`: **met 개수 정수** — 기재한 `criteria` 전체에서 값이 `met`인 기준의 수
+  (규칙 5로 기계 검증). full 0~5, light 0~3(통과 조건은 ①③이지만 no_guard 를 met
+  으로 기재했으면 score 에 포함된다). "5/5" 같은 표기는 보고서 렌더링에서만 만든다.
 - `criteria`: 3상태 판정 맵.
   - full 룰브릭: `does_this`(①), `reachable`(②), `harmful`(③), `no_guard`(④),
     `survives_rebuttal`(⑤) 5개 모두 기재.
   - light 룰브릭: `does_this`(①), `harmful`(③), `no_guard`(④의 경량 확인) 기재
     (`reachable`/`survives_rebuttal`은 생략 가능).
 - `rederivation`: claim만 보고 코드에서 독립 재도출한 요지(anti-anchoring 준수 증거).
+- **met 판정 증거 필드 3종** — full 룰브릭에서 해당 기준이 met일 때 **조건부 필수**
+  (light는 면제; minor를 격상하면 full 재채점 의무가 있으므로 자동 적용된다):
+
+  | 필드 | 형태 | 필수 조건 |
+  |---|---|---|
+  | `entry_path` | string — 진입점→결함 라인 호출 사슬 한 줄 | `rubric: "full"` 이고 `criteria.reachable == "met"` |
+  | `guard_scan` | string[] — 실제 확인한 방어 표면 목록 | `rubric: "full"` 이고 `criteria.no_guard == "met"` |
+  | `rebuttal` | string — 최강 반론 + 그것이 실패하는 이유 | `rubric: "full"` 이고 `criteria.survives_rebuttal == "met"` |
+
 - **판정 일관성 규칙** — `validate_output.py`가 기계 검증한다:
   1. **게이트**: `criteria`에 `unmet`이 하나라도 있으면 `verdict`는 반드시
      `false_positive`.
   2. **임계**: full은 met(값이 `met`인 기준) 3개 미만이면 `false_positive`;
      light는 `does_this`·`harmful`이 둘 다 met이 아니면 `false_positive`.
   3. **시나리오**: `confirmed`는 비어 있지 않은 `failure_scenario` 필수.
-  4. `false_positive`는 비어 있지 않은 `reject_reason` 필수.
+  4. `false_positive`는 비어 있지 않은 `reject_reason` 필수. 게이트 기각(`criteria`에
+     unmet 존재)이면 `reject_reason`이 **어느 기준이 unmet인지 명시**해야 한다(unmet
+     기준의 키 이름 또는 ①~⑤ 표기 중 하나 이상 포함 — unmet 오판 = 미탐 방지).
   5. `score`는 `criteria`의 met 개수와 일치.
+  6. `rubric: "full"` 이고 `reachable == "met"` 이면 비어 있지 않은 `entry_path` 필수.
+  7. `rubric: "full"` 이고 `no_guard == "met"` 이면 비어 있지 않은 `guard_scan`
+     (문자열 배열) 필수.
+  8. `rubric: "full"` 이고 `survives_rebuttal == "met"` 이면 비어 있지 않은 `rebuttal`
+     필수.
+  9. **임계 기각 전 해소 의무**: `rubric: "full"` · `verdict: "false_positive"` ·
+     `criteria`에 unmet 없음(= 임계 미달 기각)이면 `appraisal`이 비어 있으면 안 된다
+     (기각 전 unknown 해소 시도 이력 — unknown 도피로 인한 미탐 방지).
   일관성 위반은 스키마 불합격으로 처리되어 재시도된다.
 - `severity_final`: 검증자 재조정 결과. minor를 major/critical로 **격상하면 `rubric`은
   반드시 `full`**(경량 검증만 거친 발견의 상향 보고 방지).
 - `appraisal`: critical/major 감정 보강 이력(unknown 기준 추가 추적). 없으면 `[]`.
+  임계 미달 기각(unmet 없는 full false_positive)에서는 규칙 9에 따라 비어 있으면 안 된다.
+- `criteria`에 unknown이 남은 `confirmed`는 "전제가 참이면 결함"이다 — 검증자는
+  `failure_scenario`에 그 전제를 명시하고, 보고서는 **[조건부]** 배지 + unknown 기준
+  나열로 렌더링한다(`build_report.py`).
 - `fix_sample`/`fix_direction`: confirmed에 권장(보고서 렌더링에 사용).
 - 묶음 분할 검증은 `verified/<gid>.batch-N.json`에 동일 스키마로 쓰고
   `validate_output.py`가 `verified/<gid>.json`으로 병합한다.

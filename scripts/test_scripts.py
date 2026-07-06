@@ -507,6 +507,9 @@ class TestValidateVerified(unittest.TestCase):
             "rederivation": "재도출함",
             "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
                          "no_guard": "met", "survives_rebuttal": "met"},
+            "entry_path": "main → /search → handle_search:42",
+            "guard_scan": ["app.py 미들웨어 체인", "호출부 2곳"],
+            "rebuttal": "ORM 이스케이프 반론 — raw cursor 직결이라 실패",
             "severity_final": "critical",
             "failure_scenario": "q=' OR '1'='1 로 전체 유출",
             "fix_sample": "bind", "fix_direction": "파라미터화", "appraisal": []}],
@@ -519,6 +522,7 @@ class TestValidateVerified(unittest.TestCase):
         obj = {"group_id": 3, "results": [{
             "id": "g3-002", "verdict": "confirmed", "rubric": "full", "score": 3,
             "rederivation": "x",
+            "entry_path": "main → handler:10",
             "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
                          "no_guard": "unmet", "survives_rebuttal": "unmet"},
             "severity_final": "major", "failure_scenario": "s"}], "issues": []}
@@ -529,6 +533,8 @@ class TestValidateVerified(unittest.TestCase):
         obj = {"group_id": 3, "results": [{
             "id": "g3-003", "verdict": "confirmed", "rubric": "full", "score": 5,
             "rederivation": "x",
+            "entry_path": "main → h:1", "guard_scan": ["호출부"],
+            "rebuttal": "반론 — 실패 이유",
             "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
                          "no_guard": "met", "survives_rebuttal": "met"},
             "severity_final": "critical", "failure_scenario": "  "}], "issues": []}
@@ -548,11 +554,103 @@ class TestValidateVerified(unittest.TestCase):
         obj = {"group_id": 3, "results": [{
             "id": "g3-005", "verdict": "false_positive", "rubric": "full", "score": 5,
             "rederivation": "x",
+            "guard_scan": ["호출부"], "rebuttal": "반론 — 실패",
             "criteria": {"does_this": "met", "reachable": "unmet", "harmful": "met",
                          "no_guard": "met", "survives_rebuttal": "met"},
-            "severity_final": "minor", "reject_reason": "게이트"}], "issues": []}
+            "severity_final": "minor",
+            "reject_reason": "기준 ② reachable unmet — cfg.py:3 플래그 상시 off"}],
+            "issues": []}
         with self.assertRaises(SystemExit):
             self._v(obj)  # score 5 인데 met 4
+
+    # --- 규칙 6~9 + 게이트 기각 명시 (정탐 정밀도 개선) ---------------------
+
+    def _full_confirmed(self, **over):
+        base = {
+            "id": "g3-010", "verdict": "confirmed", "rubric": "full", "score": 5,
+            "rederivation": "재도출",
+            "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
+                         "no_guard": "met", "survives_rebuttal": "met"},
+            "entry_path": "main → h:1", "guard_scan": ["미들웨어", "호출부"],
+            "rebuttal": "최강 반론 — 실패 이유",
+            "severity_final": "major", "failure_scenario": "시나리오",
+            "appraisal": []}
+        base.update(over)
+        return {"group_id": 3, "results": [base], "issues": []}
+
+    def test_rule6_reachable_met_needs_entry_path(self):
+        obj = self._full_confirmed()
+        del obj["results"][0]["entry_path"]
+        with self.assertRaises(SystemExit):
+            self._v(obj)
+
+    def test_rule7_no_guard_met_needs_guard_scan(self):
+        obj = self._full_confirmed(guard_scan=[])
+        with self.assertRaises(SystemExit):
+            self._v(obj)
+
+    def test_rule8_rebuttal_met_needs_rebuttal(self):
+        obj = self._full_confirmed(rebuttal="   ")
+        with self.assertRaises(SystemExit):
+            self._v(obj)
+
+    def test_evidence_not_required_when_unknown(self):
+        # ②④ 가 unknown 이면 entry_path/guard_scan 불요 (met 일 때만 조건부 필수).
+        obj = self._full_confirmed(
+            score=3,
+            criteria={"does_this": "met", "reachable": "unknown", "harmful": "met",
+                      "no_guard": "unknown", "survives_rebuttal": "met"},
+            failure_scenario="설정 X가 기본값일 때 전제 하에 유출")
+        r = obj["results"][0]
+        del r["entry_path"], r["guard_scan"]
+        self._v(obj)  # 통과해야 함
+
+    def test_light_exempt_from_evidence_fields(self):
+        obj = {"group_id": 3, "results": [{
+            "id": "g3-011", "verdict": "confirmed", "rubric": "light", "score": 2,
+            "rederivation": "재도출",
+            "criteria": {"does_this": "met", "harmful": "met", "no_guard": "unknown"},
+            "severity_final": "minor", "failure_scenario": "s"}], "issues": []}
+        self._v(obj)  # light 는 규칙 6~8 면제
+
+    def test_light_no_guard_met_score_counts_all(self):
+        # light 에서 no_guard=met 기록 시 score 는 기재 기준 전체 met 개수(3).
+        obj = {"group_id": 3, "results": [{
+            "id": "g3-014", "verdict": "confirmed", "rubric": "light", "score": 3,
+            "rederivation": "재도출",
+            "criteria": {"does_this": "met", "harmful": "met", "no_guard": "met"},
+            "severity_final": "minor", "failure_scenario": "s"}], "issues": []}
+        self._v(obj)  # guard_scan 불요(light 면제), score=3 이 정합
+
+    def test_rule9_threshold_reject_needs_appraisal(self):
+        fp = {
+            "id": "g3-012", "verdict": "false_positive", "rubric": "full", "score": 2,
+            "rederivation": "재도출",
+            "criteria": {"does_this": "met", "reachable": "unknown", "harmful": "met",
+                         "no_guard": "unknown", "survives_rebuttal": "unknown"},
+            "severity_final": "major", "reject_reason": "임계 미달(met 2<3)"}
+        obj = {"group_id": 3, "results": [dict(fp)], "issues": []}
+        with self.assertRaises(SystemExit):
+            self._v(obj)  # appraisal 없이 임계 기각 불가
+        fp["appraisal"] = [{"item": "② 호출 경로 추적", "evidence": "라우터 등록 못 찾음"}]
+        obj2 = {"group_id": 3, "results": [fp], "issues": []}
+        self._v(obj2)  # 해소 시도 이력이 있으면 통과
+
+    def test_gate_reject_must_name_unmet_criterion(self):
+        fp = {
+            "id": "g3-013", "verdict": "false_positive", "rubric": "full", "score": 3,
+            "rederivation": "재도출",
+            "entry_path": "main → h:1",
+            "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
+                         "no_guard": "unmet", "survives_rebuttal": "unknown"},
+            "severity_final": "major",
+            "reject_reason": "방어가 이미 있음"}  # 어느 기준인지 미명시
+        obj = {"group_id": 3, "results": [dict(fp)], "issues": []}
+        with self.assertRaises(SystemExit):
+            self._v(obj)
+        fp["reject_reason"] = "기준 ④ unmet — middleware/auth.py:30 정규화 확인"
+        obj2 = {"group_id": 3, "results": [fp], "issues": []}
+        self._v(obj2)  # ①~⑤ 표기로 명시하면 통과 (키 이름도 허용)
 
 
 class TestRouteAndMergeAndClaims(unittest.TestCase):
@@ -637,11 +735,63 @@ class TestRouteAndMergeAndClaims(unittest.TestCase):
                    "criteria": {"does_this": "met", "reachable": "unknown",
                                 "harmful": "met", "no_guard": "unknown",
                                 "survives_rebuttal": "unknown"},
-                   "severity_final": "minor", "reject_reason": "임계 미달"}],
+                   "severity_final": "minor", "reject_reason": "임계 미달",
+                   "appraisal": [{"item": "② 추적", "evidence": "확정 실패"}]}],
                 "issues": []})
         vo.cmd_merge(_ns(kind="verify", group="3", run_dir=self.run))
         m = rj(os.path.join(self.run, "verified", "3.json"))
         self.assertEqual(len(m["results"]), 2)
+
+
+class TestEnvironmentValidation(unittest.TestCase):
+    """brief.environment 형태 검사 (§1, 존재 시에만 — init-state 경유)."""
+
+    def setUp(self):
+        self.run = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.run, ignore_errors=True)
+
+    def _env(self):
+        return {
+            "os_targets": {"value": ["linux"], "evidence": "CI 매트릭스 ubuntu만"},
+            "arch_targets": {"value": ["x86_64"], "evidence": "CI 매트릭스"},
+            "concurrency_model": {"value": "단일 스레드", "evidence": "main.py 동기 루프"},
+            "runtime": {"value": "Python 3.9+", "evidence": "pyproject requires-python"},
+            "exposure": {"value": "unknown", "evidence": "README 배포 절 없음(확인 시도)"},
+        }
+
+    def _init(self, env):
+        gj = groups_fixture(self.run)
+        if env is not None:
+            gj["brief"]["environment"] = env
+        wj(os.path.join(self.run, "groups.json"), gj)
+        return vo.cmd_init_state(_ns(run_dir=self.run, groups_file=None))
+
+    def test_absent_environment_ok(self):
+        self._init(None)  # 구 런 하위 호환 — 없으면 검사 안 함
+
+    def test_valid_environment_ok(self):
+        self._init(self._env())
+
+    def test_missing_key_fails(self):
+        env = self._env()
+        del env["runtime"]
+        with self.assertRaises(SystemExit) as cm:
+            self._init(env)
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_missing_evidence_fails(self):
+        env = self._env()
+        env["os_targets"] = {"value": ["linux"], "evidence": "  "}
+        with self.assertRaises(SystemExit):
+            self._init(env)
+
+    def test_unknown_extra_key_fails(self):
+        env = self._env()
+        env["compiler"] = {"value": "gcc", "evidence": "Makefile"}
+        with self.assertRaises(SystemExit):
+            self._init(env)
 
 
 class TestBuildReport(unittest.TestCase):
@@ -668,11 +818,14 @@ class TestBuildReport(unittest.TestCase):
             results.append({
                 "id": fid, "verdict": "confirmed",
                 "rubric": "light" if sev == "minor" else "full",
-                "score": 2 if sev == "minor" else 5, "rederivation": "x",
+                "score": 3 if sev == "minor" else 5, "rederivation": "x",
                 "criteria": ({"does_this": "met", "harmful": "met", "no_guard": "met"}
                              if sev == "minor" else
                              {"does_this": "met", "reachable": "met", "harmful": "met",
                               "no_guard": "met", "survives_rebuttal": "met"}),
+                "entry_path": "" if sev == "minor" else "main → h:1",
+                "guard_scan": [] if sev == "minor" else ["호출부"],
+                "rebuttal": "" if sev == "minor" else "반론 — 실패",
                 "severity_final": sev, "failure_scenario": "시나리오",
                 "fix_sample": "fixed", "fix_direction": "방향"})
         wj(os.path.join(self.run, "defects", "3.json"),
@@ -684,7 +837,37 @@ class TestBuildReport(unittest.TestCase):
     def test_single_file(self):
         self._seed(3)
         build_report.main(["--run-dir", self.run])
-        self.assertTrue(os.path.exists(os.path.join(self.run, "감사보고서.md")))
+        path = os.path.join(self.run, "감사보고서.md")
+        self.assertTrue(os.path.exists(path))
+        # 전 기준 met → 조건부 배지 없음.
+        self.assertNotIn("[조건부]", open(path, encoding="utf-8").read())
+
+    def test_conditional_badge_on_unknown(self):
+        # unknown 이 남은 confirmed → [조건부] 배지 + unknown 기준 나열.
+        wj(os.path.join(self.run, "defects", "3.json"),
+           {"group_id": 3, "findings": [{
+               "id": "g3-001", "pass": "primary", "category": "security",
+               "severity": "major", "confidence": "medium",
+               "location": {"file": "api/search.py", "start": 5, "end": 6,
+                            "symbol": "h"},
+               "claim": "c", "rationale": "메커니즘", "snippet": "bad",
+               "evidence_files": []}],
+            "coverage": [], "cross_refs": [], "issues": []})
+        wj(os.path.join(self.run, "verified", "3.json"),
+           {"group_id": 3, "results": [{
+               "id": "g3-001", "verdict": "confirmed", "rubric": "full", "score": 3,
+               "rederivation": "x",
+               "criteria": {"does_this": "met", "reachable": "unknown",
+                            "harmful": "met", "no_guard": "unknown",
+                            "survives_rebuttal": "met"},
+               "rebuttal": "반론 — 실패",
+               "severity_final": "major",
+               "failure_scenario": "WAF 없는 배포에서 유출"}], "issues": []})
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertIn("[조건부]", text)
+        self.assertIn("②reachable", text)
+        self.assertIn("④no_guard", text)
 
     def test_split_over_threshold(self):
         self._seed(18)  # >15 → 분할

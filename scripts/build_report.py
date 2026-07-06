@@ -18,6 +18,8 @@ SEV_ORDER = {"critical": 0, "major": 1, "minor": 2}
 SEV_KO = {"critical": "🔴 Critical", "major": "🟠 Major", "minor": "🟡 Minor"}
 CAT_KO = {"security": "보안", "concurrency": "동시성", "fault": "결함 처리",
           "logic": "로직", "resource": "리소스"}
+CRITERION_MARK = {"does_this": "①", "reachable": "②", "harmful": "③",
+                  "no_guard": "④", "survives_rebuttal": "⑤"}
 SPLIT_THRESHOLD = 15
 
 
@@ -58,6 +60,7 @@ def collect(run_dir):
                 "location": src.get("location", {}),
                 "score": r.get("score", 0),
                 "rubric": r.get("rubric", "full"),
+                "criteria": r.get("criteria", {}),
                 "snippet": src.get("snippet", ""),
                 "mechanism": src.get("rationale", ""),
                 "failure_scenario": r.get("failure_scenario", ""),
@@ -95,18 +98,32 @@ def loc_str(loc):
 
 
 def score_str(rec):
-    denom = 5 if rec["rubric"] == "full" else 2
+    # 분모 = 기재된 기준 수 (full 5, light 2~3 — no_guard 기재 여부에 따라).
+    crit = rec.get("criteria") or {}
+    denom = len(crit) if crit else (5 if rec["rubric"] == "full" else 2)
     return f"{rec['score']}/{denom}"
 
 
+def unknown_criteria(rec):
+    return [k for k in CRITERION_MARK
+            if rec.get("criteria", {}).get(k) == "unknown"]
+
+
 def render_finding(idx, rec):
+    unknowns = unknown_criteria(rec)
+    badge = " **[조건부]**" if unknowns else ""
     L = []
-    L.append(f"### {idx}. {loc_str(rec['location'])}")
+    L.append(f"### {idx}.{badge} {loc_str(rec['location'])}")
     L.append("")
     L.append(f"- **심각도**: {SEV_KO.get(rec['severity'], rec['severity'])}  ·  "
              f"**분류**: {CAT_KO.get(rec['category'], rec['category'])}  ·  "
              f"**검증 점수**: {score_str(rec)}  ·  **ID**: `{rec['id']}`")
     L.append("")
+    if unknowns:
+        marks = ", ".join(f"{CRITERION_MARK[k]}{k}" for k in unknowns)
+        L.append(f"> **[조건부]** 미확정(unknown) 기준: {marks} — 실패 시나리오에 "
+                 f"명시된 전제가 참일 때 성립하는 발견이다.")
+        L.append("")
     if rec["snippet"]:
         L.append("**결함 코드**")
         L.append("```")
