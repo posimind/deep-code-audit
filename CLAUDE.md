@@ -5,18 +5,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repository state
 
 The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
-(orchestrator), [references/](references/) (prompt templates + schema spec), and
-[scripts/](scripts/) (4 Python scripts + unit tests, standard library only). The single
-design document (Korean) is
+(orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
+(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 34 unit
+tests, standard library only). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
 plan, and describes the design as implemented plus the remaining milestones (M3 eval
 fixture + scoring script, M4 measurement/tuning).
 
+The hunter and verifier are **dedicated subagents** (`agents/deep-audit-hunter.md`,
+`agents/deep-audit-verifier.md`): their invariant protocol lives in the agent **body**
+(= system prompt, loaded from disk by the harness) rather than being passed through the
+orchestrator's context. The orchestrator spawns them by `subagent_type` with a lean
+task prompt (run variables only) built from `references/hunt-task.md` / `verify-task.md`.
+This is the single source of truth — there is no combined body+task file; compatibility
+mode concatenates the two on the fly only under explicit user consent (see Stage 0).
+
 `~/.claude/skills/deep-code-audit` is a **symlink to this repo**, so edits here are live —
-no sync step. A field-test run directory (`.deep-code-audit/20260702-233848/`, target:
-ssam) exists at the root with the problem-analysis report that motivated the Rust-parser
-improvement round.
+no sync step. The dedicated agents need a **second symlink**,
+`~/.claude/agents/deep-code-audit → <repo>/agents` (user-scope agents dir is recursively
+scanned; identifier = frontmatter `name`, not path). Agents installed after a session
+starts are not recognized until restart — Stage 0 preflight checks this. A field-test run
+directory (`.deep-code-audit/20260702-233848/`, target: ssam) exists at the root with the
+problem-analysis report that motivated the Rust-parser improvement round.
 
 ### Commands
 
@@ -24,8 +35,9 @@ improvement round.
 - **Compile check**: `python3 -m py_compile scripts/*.py`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
-judgment (project classification, defect scoring) lives in the prompt templates under
-`references/`.
+judgment (project classification, defect scoring) lives in the prompts — the hunter/verifier
+detection & rubric protocols in the agent bodies under `agents/`, and the orchestrator's
+in-model steps plus task/report skeletons under `references/`.
 
 ## Purpose
 
@@ -42,6 +54,10 @@ The pipeline hands off state between stages **via files on disk** (under
 separate subagent and completed stages can be skipped on resume:
 
 ```
+[0] Preflight         confirm dedicated agent defs exist (deterministic) + are recognized this
+                       session (in-model) BEFORE creating the run dir; canary-spawn both types
+                       after; abort by default on failure (compat mode only on explicit consent);
+                       record preflight/mode.json (dedicated|compat)
 [1] Select & group    audit brief (in-model: project purpose, lens priority, high-risk areas)
                        → select_targets (core / low / exclude) → in-model classification review
                        → group_by_lines build (line-count balance + import-graph cohesion,
@@ -70,6 +86,23 @@ separate subagent and completed stages can be skipped on resume:
 
 Key design decisions worth preserving when modifying this skill:
 
+- **Invariant protocol lives in the agent body; only run variables ride the task prompt.**
+  The hunter/verifier protocols (read-vs-report split, injection defense, tri-state rubric,
+  anti-anchoring) are the agent-definition **body** = system prompt, loaded from disk by the
+  harness — so compaction can't paraphrase or truncate them mid-run (the prompt analogue of
+  the silent-degradation class this skill guards against), the orchestrator's context isn't
+  re-billed the ~130-line template per spawn, and `subagent_type` selection is explicit
+  (a wrong general-type pick = protocol not delivered). Task-prompt skeletons
+  (`hunt-task.md`/`verify-task.md`) carry only `{{...}}` variables — never copy the protocol
+  into them. `tools` is an allowlist (`Read, Grep, Glob, Bash, Write`, no Edit/MCP) — an
+  accident-prevention measure, **not** a security boundary while Bash is present. Because the
+  protocol moved off the orchestrator's context path, **agent-recognition failure now equals
+  protocol-not-delivered**: Stage 0 preflight makes this a hard gate (abort by default;
+  compatibility mode — concatenating body + task skeleton onto a general subagent — runs only
+  on explicit user consent, is logged, and is surfaced in the final report). The target repo's
+  CLAUDE.md/AGENTS.md is auto-injected into the dedicated agents' context (a privileged
+  injection channel the hunter can't decline), so both agent bodies explicitly neutralize
+  auto-injected directives as untrusted audit data.
 - **File handoff between stages is mandatory** — findings must be recorded to disk
   (`defects/<group_id>.json`, `verified/<group_id>.json`) rather than kept only in a
   subagent's context. Every stage output is schema-validated (`validate_output.py`); a
