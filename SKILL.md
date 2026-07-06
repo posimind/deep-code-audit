@@ -29,8 +29,16 @@ description: >-
   - `group_by_lines.py` 라인수+import 응집 그룹핑, 실패 그룹 이분할
   - `validate_output.py` 스키마 검증·state 갱신·힌트 라우팅·claim 발췌·병합·issues
   - `build_report.py` 한국어 보고서 렌더·분할
-- `references/` — 채워서 서브에이전트에 전달하는 프롬프트 골격 + 스키마.
-  - `hunt-agent.md`, `verify-agent.md`, `report-format.md`, `schemas.md`
+- `agents/` — **전용 서브에이전트 정의 2종**. 불변 프로토콜(읽기/보고 분리·인젝션 방어·
+  룰브릭·anti-anchoring 등)이 에이전트 **본문(=시스템 프롬프트)** 에 있고, 하네스가
+  디스크에서 직접 로드한다 — 오케스트레이터 컨텍스트를 경유하지 않아 컴팩션 의역·축약이
+  원리적으로 불가능하다.
+  - `deep-audit-hunter.md` — Stage 2 primary / Stage 2.5 sweep·second_pass 3모드 겸용
+  - `deep-audit-verifier.md` — Stage 3 적대적 검증(단일/batch/2턴 분리 공용)
+  - **설치**: 스킬 심링크 외에 에이전트 심링크가 별도로 필요하다:
+    `ln -s <이 스킬 경로>/agents ~/.claude/agents/deep-code-audit`
+- `references/` — 채워서 서브에이전트에 전달하는 **태스크 프롬프트 골격(런 변수만)** + 스키마.
+  - `hunt-task.md`, `verify-task.md`, `report-format.md`, `schemas.md`
 
 > 명령 예시의 `$SKILL` 은 이 SKILL.md가 있는 디렉터리, `$RUN` 은 run 디렉터리다.
 > 실제 실행 시 절대경로로 치환하라.
@@ -56,7 +64,24 @@ description: >-
 
 ---
 
-## Stage 0 — Run 디렉터리와 재개 판별
+## Stage 0 — 프리플라이트 · Run 디렉터리 · 재개 판별
+
+### 0a. 전용 에이전트 프리플라이트 (run 디렉터리 생성 전)
+
+헌터·검증자의 불변 프로토콜은 전용 에이전트 정의 본문에 있으므로, **에이전트 인식 실패 =
+프로토콜 미전달**이다. 모른 채 진행하면 조용한 품질 저하(이 스킬이 크래시보다 위험하게
+취급하는 실패 양식)가 된다. 신규 런·재개 공통으로 Stage 1 진입 전에 검사한다:
+
+1. **정의 파일 확인(결정적)**: 에이전트 설치 위치(`~/.claude/agents/deep-code-audit/`
+   심링크 또는 동등 경로)에 두 파일이 존재하고 frontmatter `name` 이
+   `deep-audit-hunter` / `deep-audit-verifier` 와 일치하는지 ls/grep 으로 확인.
+2. **세션 인식 확인(인모델)**: 현재 세션에서 사용 가능한 subagent 타입 목록에 두 타입이
+   보이는지 확인. **파일은 있는데 안 보이면** 세션 시작 후에 설치된 정의라 등록되지 않은
+   것이다(실측 확인된 동작) — 세션 재시작을 안내한다.
+
+여기서 실패하면 **잔여물 없이 중단**한다(아래 실패 정책). 통과 시 0b로.
+
+### 0b. Run 디렉터리와 재개 판별
 
 1. 대상 루트 확정. 산출은 `<대상루트>/.deep-code-audit/<run-id>/` 아래.
 2. **재개 판별**: run-id 미지정 시 `.deep-code-audit/` 의 **최신** run 디렉터리
@@ -64,9 +89,45 @@ description: >-
    을 이어간다. 완료 상태이거나 run 디렉터리가 없으면 **새 run** 생성:
    `run-id = YYYYMMDD-HHMMSS`(현재 시각). 완료 기준은 파일 존재가 아니라 `state.json`
    의 검증 통과 기록이다.
+   - **state.json 이 없는 최신 run 디렉터리**는 "프리플라이트(카나리)에서 중단된 런"으로
+     간주한다(init-state 는 Stage 1e 에서야 실행되므로 state.json 부재가 그 시그니처다).
+     새 디렉터리를 만들지 말고 **그 디렉터리를 재사용**해 0c 부터 재시도한다 — 실패할
+     때마다 run 디렉터리가 늘어나는 것을 막는다.
+   - **재개 시 모드 일관성**: `preflight/mode.json` 의 기록 모드와 현재 환경이 다르면
+     (compat 런인데 전용 타입이 생겼거나, dedicated 런인데 사라짐) **자동 전환하지 않고**
+     차이를 고지한 뒤 사용자 결정을 받는다 — 그룹 간 처리 방식이 갈리는 혼합 런은 결과
+     비교 가능성을 깨므로 동의 없이 금지.
 3. `.deep-code-audit/` 이 대상의 VCS에 오염되지 않도록, 없으면 대상 루트 `.gitignore`
    에 `.deep-code-audit/` 추가를 안내(또는 사용자 동의 시 직접 추가).
 4. 이후 각 단계 시작 전 `state.json` 을 확인해 **완료된 단계·그룹은 스킵**한다.
+
+### 0c. 카나리 스폰과 모드 기록 (run 디렉터리 확정 후)
+
+두 에이전트를 각각 최소 과제로 **동시 스폰**해 동작을 확인한다: 태스크 프롬프트
+"`$RUN/preflight/<에이전트명>.json` 에 `{"ok": true}` 를 기록하라" → 두 파일 생성 확인.
+스폰 가능성·Write 동작·run 디렉터리 쓰기 권한을 한 번에 검증한다(비용은 미니 스폰 2회 —
+전체 런 대비 무시 가능). 남은 미완료 단계가 서브에이전트를 요구하지 않으면(보고서만 남은
+재개) 생략 가능.
+
+통과(또는 아래 호환 동의) 시 `$RUN/preflight/mode.json` 에
+`{"mode": "dedicated" | "compat"}` 를 기록한다(오케스트레이터가 직접 쓰는 비스키마 정보
+파일 — 스크립트는 이 파일을 다루지 않는다).
+
+### 프리플라이트 실패 정책
+
+- **기본 중단**: 어느 검사가 왜 실패했는지 + 교정 방법(에이전트 심링크 설치 명령, 세션
+  재시작)을 보고하고 **Stage 1 로 진행하지 않는다**. run 디렉터리가 이미 있으면
+  `log-issue --stage preflight` 로 기록한다(없으면 대화 보고만 — 기록 위치가 없다).
+  중단 비용은 낮다: state.json 재개 아키텍처 덕에 환경을 고치고 재개하면 완료분은
+  건너뛴다. 중단이 싸고 저품질 완주가 비싸므로 기본값은 중단이다.
+- **호환 모드는 명시 동의로만**: 전용 타입을 쓸 수 없는 환경에서, 저하 내용(프로토콜이
+  오케스트레이터 컨텍스트를 경유 → 컴팩션 의역 위험 부활, 스폰 프롬프트 비대, frontmatter
+  도구 제한 상실)을 고지받은 사용자가 **명시적으로 동의한 경우에만**: 에이전트 정의
+  `agents/<name>.md` **본문** + `references/<x>-task.md` 골격을 이어붙여 범용(파일 쓰기
+  가능) 서브에이전트로 전달한다 — 별도 통합본은 유지하지 않는다(단일 소스). 이때 태스크
+  프롬프트에 **감사 대상 파일 수정 금지(Edit 등)** 를 명시해 도구 제한 상실을 프롬프트
+  수준에서나마 보완한다. 동의 사실을 `log-issue` 로 기록하고, 최종 사용자 보고에 호환
+  모드 실행임을 명시한다. 자동 발동은 금지다.
 
 ---
 
@@ -143,10 +204,14 @@ python3 $SKILL/scripts/validate_output.py init-state --run-dir $RUN
 병렬**로 위임한다. **동시 상한 4~6**을 오케스트레이터가 직접 관리한다: 상한만큼 스폰 →
 완료 통지를 받을 때마다 다음 그룹 스폰.
 
-- **에이전트 타입**: 파일 쓰기가 가능한 범용 서브에이전트(읽기 전용 탐색 타입 금지 —
-  산출 JSON을 못 쓴다). **모델은 지정하지 않고 상속**한다.
-- **프롬프트**: `references/hunt-agent.md` 의 골격에 `{{TARGET_ROOT}}`, `{{RUN_DIR}}`,
-  `{{GROUP_ID}}` 를 채우고 **primary 모드 스위치**를 적용해 전달한다.
+- **에이전트 타입**: `subagent_type: deep-audit-hunter` **명시 지정**(범용 타입 금지 —
+  불변 프로토콜이 에이전트 본문에 있어, 타입을 잘못 고르면 프로토콜 미전달이다).
+  모델은 에이전트 frontmatter 에서 `model` 을 생략해 **상속(inherit)** 이 보장된다 —
+  스폰 시에도 지정하지 않는다.
+- **프롬프트**: `references/hunt-task.md` 골격에 `{{TARGET_ROOT}}`·`{{RUN_DIR}}`·
+  `{{GROUP_ID}}`·`{{SCHEMA_PATH}}`(= `$SKILL/references/schemas.md` **절대경로**)·
+  `{{OUTPUT_PATH}}` 를 채우고 **primary 모드 절**을 넣어 전달한다. **프로토콜 전문을
+  태스크 프롬프트에 복사하지 마라** — 변수 몇 개짜리 태스크 프롬프트가 이 구조의 목적이다.
 - 산출: `$RUN/defects/<gid>.json`.
 
 각 헌터 완료 시 검증:
@@ -176,8 +241,9 @@ python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
 힌트와 exclude 대상 힌트를 걸러 `$RUN/hints/<gid>.json` 을 만든다. 힌트 파일이 생긴 그룹
 마다 **sweep 헌터**를 위임한다:
 
-- 프롬프트: `hunt-agent.md` + **sweep 모드 스위치**. 힌트 지점만 집중 조사, 기존 결과
-  미열람, 산출 `$RUN/defects/<gid>.sweep.json`(ID 접두사 `w`).
+- 스폰: `subagent_type: deep-audit-hunter` + `hunt-task.md` 골격의 **sweep 모드 절**.
+  힌트 지점만 집중 조사, 기존 결과 미열람, 산출 `$RUN/defects/<gid>.sweep.json`(ID
+  접두사 `w`).
 - 검증·병합:
   ```
   python3 $SKILL/scripts/validate_output.py validate --stage sweep --group <gid> --run-dir $RUN --no-coverage
@@ -190,8 +256,9 @@ python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
 `high_risk: true` 그룹(= `state.second` 에 키가 있는 그룹)마다 **critical 전용 2차
 헌터**를 위임한다:
 
-- 프롬프트: `hunt-agent.md` + **second_pass 모드 스위치**. "critical만", 1차 결과 미열람,
-  산출 `$RUN/defects/<gid>.second.json`(ID 접두사 `s`, severity 전부 critical).
+- 스폰: `subagent_type: deep-audit-hunter` + `hunt-task.md` 골격의 **second_pass 모드
+  절**. "critical만", 1차 결과 미열람, 산출 `$RUN/defects/<gid>.second.json`(ID 접두사
+  `s`, severity 전부 critical).
 - 검증·병합:
   ```
   python3 $SKILL/scripts/validate_output.py validate --stage second --group <gid> --run-dir $RUN --no-coverage
@@ -217,10 +284,12 @@ python3 $SKILL/scripts/validate_output.py extract-claims --run-dir $RUN
 
 발견이 있는 그룹마다 **새 컨텍스트** 검증자를 위임한다(헌터와 컨텍스트 비공유):
 
-- 프롬프트: `references/verify-agent.md` 골격에 `{{CLAIMS_EMBED}}` = `claims/<gid>.json`
-  의 `claims` 배열을 **그대로 임베드**, `{{GROUP_ID}}`·`{{RUN_DIR}}`·`{{OUTPUT_PATH}}` 채움.
-  **rationale 은 임베드하지 말고** `defects/<gid>.json` 경로만 주며 "전체 재도출 후에만
-  열람" 지시를 유지한다(anti-anchoring).
+- 스폰: `subagent_type: deep-audit-verifier` **명시 지정**. 프롬프트는
+  `references/verify-task.md` 골격에 `{{CLAIMS_EMBED}}` = `claims/<gid>.json` 의 `claims`
+  배열을 **그대로 임베드**, `{{GROUP_ID}}`·`{{RUN_DIR}}`·`{{OUTPUT_PATH}}`·
+  `{{SCHEMA_PATH}}`(절대경로) 채움. **rationale 은 임베드하지 말고** `defects/<gid>.json`
+  경로만 준다 — "전체 재도출 후에만 열람" 프로토콜은 에이전트 본문이 담당한다
+  (anti-anchoring).
 - 산출: `$RUN/verified/<gid>.json`. 발견이 많아 묶음 분할하면 각 검증자는
   `verified/<gid>.batch-N.json` 에 쓰고 병합:
   ```
@@ -233,8 +302,9 @@ python3 $SKILL/scripts/validate_output.py extract-claims --run-dir $RUN
   스크립트가 판정 일관성(게이트·임계·시나리오·격상 시 full 룰브릭·score=met개수)을 기계
   검증하고 통과 시 `state.verify[gid]=done`.
 
-편승 징후(`rederivation` 이 헌터 rationale과 자구 수준으로 유사)가 보이면 verify-agent.md
-말미의 **2턴 분리**로 격상한다.
+편승 징후(`rederivation` 이 헌터 rationale과 자구 수준으로 유사)가 보이면 verify-task.md
+말미의 **2턴 분리**로 격상한다(동일 `deep-audit-verifier` 타입, 골격에서 defects 경로를
+빼고 스폰 → 재도출 수신 → 후속 메시지로 경로 전달).
 
 ---
 
@@ -270,6 +340,8 @@ python3 $SKILL/scripts/validate_output.py set-state --run-dir $RUN --stage repor
 1. **스키마/일관성·미커버 불합격(산출 파일은 있음)**: `validate_output.py` 가 오류 메시지를
    낸다. **동일 에이전트에 후속 메시지로 오류를 회신**해 1회 재시도(새 스폰 아님 —
    컨텍스트가 살아 있어 수정이 가장 싸다). 미커버는 첨부된 파일 목록을 정독하도록 지시.
+   회신에는 "산출 파일을 먼저 Read 한 뒤 고쳐 써라"를 포함하라 — 재개된 에이전트는 파일
+   상태가 초기화되어 Read 없는 Write(덮어쓰기)가 거부된다(실측).
 2. **무응답·크래시(산출 파일 자체가 없음)**: 회신 상대가 없으므로 **새 에이전트 스폰**으로
    1회 재시도.
 3. **재실패 시 폴백**(곧바로 포기하지 않는다 — 포기 대가는 예산 규모의 감사 공백):
@@ -283,6 +355,14 @@ python3 $SKILL/scripts/validate_output.py set-state --run-dir $RUN --stage repor
    - **검증자**: 묶음 축소(발견 수 절반) 재시도 1회.
    - 그래도 실패한 하위 그룹·묶음만 `set-state ... --status failed`. 보고서에 "검증 불능
      그룹"으로 명시된다(포기하되 은폐하지 않는다).
+
+### 런 중간 타입 미인식 = 인프라 실패 (재시도 사다리와 별개)
+
+런 도중 스폰이 `Agent type '...' not found` 류 오류로 실패하면(재개 세션의 환경 변화 등)
+해당 그룹을 범용 타입으로 **강등하지 않는다** — 혼합 모드는 그룹 간 결과 비교 가능성을
+깨고 문제를 가린다. `log-issue` 후 **중단**하고 환경 교정(에이전트 심링크 복원, 세션
+재시작) → 재개를 안내한다. 위 재시도 사다리는 산출물 불량용이며, 이 실패 계열에는
+적용하지 않는다.
 
 ### 운용 문제 기록 (필수)
 
