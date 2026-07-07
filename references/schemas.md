@@ -163,7 +163,9 @@
   `validate_output.py`가 그룹 파일 목록과 대조하여 미커버 core 파일이 있으면 재시도.
   각 항목은 경로 + 한 줄 역할 + 최상위 위험 가설(없으면 "특이점 없음"+근거).
 - `cross_refs`: 타 그룹 결함 징후 힌트. `category` 필수 — Stage 2.5 커버 판정(위치
-  중첩 + 동일 category)에 쓰인다. 없으면 `[]`.
+  중첩 + 동일 category)에 쓰인다. 없으면 `[]`. sweep/2차 산출의 cross_refs 는 병합 시
+  base 파일로 **보존 병합**된다(file+line+category 중복은 base 우선 스킵) — 라우팅이
+  중간 산출을 읽지 않으므로, 옮기지 않으면 힌트가 사장된다.
 - `issues`: 선택. 작업 중 겪은 운용 문제(§5 형식). `validate_output.py`가
   `issues.jsonl`로 병합.
 
@@ -340,7 +342,9 @@ rationale을 제거한 발췌 — 검증자에게 먼저 임베드된다(anti-an
 
 ### 6-2. `hints/<gid>.json` (`validate_output.py route-hints` 산출, Stage 2.5 sweep 입력)
 
-미커버 cross_refs를 소유 그룹으로 라우팅한 결과.
+미커버 cross_refs를 소유 그룹으로 라우팅한 결과. 기존 `hints/*.json` 에 이미 있는
+힌트(file+line+category 동일)는 재라우팅하지 않는다 — 조사 후 기각된 힌트의 재소비를
+막고 재실행(재개)을 멱등하게 만든다.
 
 ```jsonc
 {
@@ -348,6 +352,24 @@ rationale을 제거한 발췌 — 검증자에게 먼저 임베드된다(anti-an
   "hints": [
     {"file": "db/conn.py", "line": 15, "category": "concurrency",
      "hint": "커넥션이 전역 공유되나 락 없음 — 동시성 의심", "from_group": 3}
+  ]
+}
+```
+
+### 6-3. `hints/residue.json` (`route-hints --residue-check` 산출, Stage 2.5c)
+
+전 sweep 병합 후 남은 **미소진 힌트**(주로 sweep 헌터가 조사 중 새로 남긴
+cross_refs — 이번 런에 추가 조사 라운드가 없다). `build_report.py` 가 요약부에
+"미소진 힌트(추가 확인 권장 지점)"로 표면화한다. **잔여가 없어도 빈 목록으로
+기록된다**(검사 수행 증거). 이후의 일반 `route-hints` 실행은 residue 힌트도 "이미
+처리됨"으로 간주해 재라우팅하지 않는다 — "sweep 라운드 1회" 불변식이 재개 후에도
+유지된다(잔여 검사 자신만 residue.json 을 제외하고 재산출한다).
+
+```jsonc
+{
+  "hints": [
+    {"file": "db/conn.py", "line": 40, "category": "resource",
+     "hint": "커서 미해제 의심", "from_group": "3", "owner_group": "5"}
   ]
 }
 ```

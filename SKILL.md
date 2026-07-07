@@ -249,31 +249,13 @@ python3 $SKILL/scripts/validate_output.py validate --stage hunt --group <gid> --
 
 ---
 
-## Stage 2.5 — 보강 패스 (힌트 라우팅 + 고위험 2차 패스)
+## Stage 2.5 — 보강 패스 (고위험 2차 패스 → 힌트 라우팅 → 잔여 검사)
 
-전 그룹 hunt 가 끝난 뒤 실행한다.
+전 그룹 hunt 가 끝난 뒤 실행한다. **순서가 의미 있다**: 2차 패스를 먼저 돌려 병합해야
+2차 헌터가 남긴 `cross_refs`(critical 전용 패스의 힌트 — 가장 잃어선 안 되는 축)까지
+힌트 라우팅이 소비하고, 2차 발견이 커버 판정에 반영되어 불필요한 sweep 이 줄어든다.
 
-### 2.5a. 힌트 라우팅 → sweep
-
-```
-python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
-```
-
-`cross_refs` 를 소유 그룹으로 라우팅하고, 기존 findings가 커버(위치 중첩+동일 category)하는
-힌트와 exclude 대상 힌트를 걸러 `$RUN/hints/<gid>.json` 을 만든다. 힌트 파일이 생긴 그룹
-마다 **sweep 헌터**를 위임한다:
-
-- 스폰: `subagent_type: deep-audit-hunter` + `hunt-task.md` 골격의 **sweep 모드 절**.
-  힌트 지점만 집중 조사, 기존 결과 미열람, 산출 `$RUN/defects/<gid>.sweep.json`(ID
-  접두사 `w`).
-- 검증·병합:
-  ```
-  python3 $SKILL/scripts/validate_output.py validate --stage sweep --group <gid> --run-dir $RUN --no-coverage
-  python3 $SKILL/scripts/validate_output.py merge --kind sweep --group <gid> --run-dir $RUN
-  ```
-  병합은 ID 유일성 + 기존 발견 보존(상위집합) 검사를 수행한다.
-
-### 2.5b. 고위험 2차 패스
+### 2.5a. 고위험 2차 패스
 
 `high_risk: true` 그룹(= `state.second` 에 키가 있는 그룹)마다 **critical 전용 2차
 헌터**를 위임한다:
@@ -287,7 +269,41 @@ python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
   python3 $SKILL/scripts/validate_output.py merge --kind second --group <gid> --run-dir $RUN
   ```
   병합은 위치 중첩+동일 category 중복 제거(다른 category는 별개로 보존) + ID 유일성 +
-  기존 발견 보존 검사.
+  기존 발견 보존 검사, 그리고 **cross_refs 보존 병합**(2차 힌트를 base 로 옮겨 다음
+  단계가 소비하게 한다)을 수행한다.
+
+### 2.5b. 힌트 라우팅 → sweep
+
+```
+python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN
+```
+
+`cross_refs`(1차 + 병합된 2차)를 소유 그룹으로 라우팅하고, 기존 findings가 커버(위치
+중첩+동일 category)하는 힌트·이미 라우팅된 힌트(재개 시 멱등)·exclude 대상 힌트를 걸러
+`$RUN/hints/<gid>.json` 을 만든다. 힌트 파일이 생긴 그룹마다 **sweep 헌터**를 위임한다:
+
+- 스폰: `subagent_type: deep-audit-hunter` + `hunt-task.md` 골격의 **sweep 모드 절**.
+  힌트 지점만 집중 조사, 기존 결과 미열람, 산출 `$RUN/defects/<gid>.sweep.json`(ID
+  접두사 `w`).
+- 검증·병합:
+  ```
+  python3 $SKILL/scripts/validate_output.py validate --stage sweep --group <gid> --run-dir $RUN --no-coverage
+  python3 $SKILL/scripts/validate_output.py merge --kind sweep --group <gid> --run-dir $RUN
+  ```
+  병합은 위치 중첩+동일 category 중복 제거(선행 병합된 2차 발견과의 중복 방지) +
+  ID 유일성 + 기존 발견 보존(상위집합) 검사 + cross_refs 보존 병합을 수행한다.
+
+### 2.5c. 잔여 힌트 검사 (전 sweep 병합 후, 필수)
+
+```
+python3 $SKILL/scripts/validate_output.py route-hints --run-dir $RUN --residue-check
+```
+
+sweep 헌터가 조사 중 **새로** 남긴 cross_refs 는 병합으로 base 에 보존되지만, 이번 런에
+추가 sweep 라운드는 없다(무한 재귀 방지). 이 명령이 그런 미소진 힌트를 걸러
+`$RUN/hints/residue.json` 에 기록하고(잔여 없음이면 빈 목록 — 검사 수행 증거), 보고서
+요약부가 "미소진 힌트(추가 확인 권장 지점)"로 표면화한다 — 포기하되 은폐하지 않는다.
+잔여가 있으면 최종 사용자 보고에도 건수를 포함하라.
 
 ---
 

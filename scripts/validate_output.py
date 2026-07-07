@@ -3,9 +3,11 @@
 
 판단은 모델에게, 기계적 작업만 스크립트에게. 이 스크립트는 다음만 한다(전부 결정적):
   validate       스키마 검증 + low 심각도 강등 + coverage 대조 + issues 병합 + state=done
-  route-hints    cross_refs 수집 → 소유 그룹 라우팅 → 커버 대조 → hints/<gid>.json
+  route-hints    cross_refs 수집 → 소유 그룹 라우팅 → 커버·기라우팅 대조 →
+                 hints/<gid>.json (--residue-check: 미소진 힌트 → hints/residue.json)
   extract-claims defects → claims/<gid>.json (rationale 제거)
-  merge          sweep/second/verify 산출 병합 (ID 유일성·기존 발견 보존 검사)
+  merge          sweep/second/verify 산출 병합 (ID 유일성·기존 발견 보존 검사 +
+                 sweep/second cross_refs 를 base 로 보존 병합)
   init-state     groups.json → state.json (전부 pending)
   set-state      단계/그룹 상태를 retrying|failed|done 로 갱신 (오케스트레이터용)
   log-issue      issues.jsonl append (오케스트레이터용)
@@ -392,8 +394,13 @@ def _covered(cref, findings):
     return False
 
 
+def _hint_key(c):
+    return (c["file"], c["line"], c["category"])
+
+
 def cmd_route_hints(args):
     run_dir = args.run_dir
+    residue_mode = bool(getattr(args, "residue_check", False))
     groups_file = args.groups_file or os.path.join(run_dir, "groups.json")
     _, _, _, gid_of = group_index(groups_file)
 
@@ -403,6 +410,7 @@ def cmd_route_hints(args):
     for path in sorted(glob.glob(os.path.join(defects_dir, "*.json"))):
         base = os.path.basename(path)
         if base.endswith(".sweep.json") or base.endswith(".second.json"):
+            # 병합 전 중간 산출 — cross_refs 는 merge 가 base 파일로 보존한다.
             continue
         obj = load_json(path)
         src_gid = str(obj["group_id"])
@@ -410,13 +418,29 @@ def cmd_route_hints(args):
         for c in obj.get("cross_refs", []) or []:
             all_crefs.append((src_gid, c))
 
+    # 이미 처리된 힌트는 재라우팅하지 않는다 — hints/<gid>.json(라우팅됨)과
+    # hints/residue.json(보고서 표면화로 종결)이 그 기록이다. sweep 이 조사 후 기각한
+    # 힌트의 재소비를 막고, 재개 후에도 "sweep 라운드는 1회" 불변식을 유지한다.
+    # 잔여 검사 자신은 residue.json 을 제외하고 다시 계산한다(재실행 시 같은 잔여를
+    # 재산출·갱신 — 기존 잔여를 already 로 삼으면 빈 목록으로 덮어써 표면화가 사라진다).
+    hints_dir = os.path.join(run_dir, "hints")
+    already = set()
+    for path in glob.glob(os.path.join(hints_dir, "*.json")):
+        if residue_mode and os.path.basename(path) == "residue.json":
+            continue
+        for h in load_json(path).get("hints", []):
+            already.add(_hint_key(h))
+
     routed = {}
     stats = {"total": len(all_crefs), "discarded_out_of_scope": 0,
-             "covered": 0, "routed": 0}
+             "covered": 0, "already_routed": 0, "routed": 0}
     for src_gid, c in all_crefs:
         owner = gid_of.get(c["file"])
         if owner is None:
             stats["discarded_out_of_scope"] += 1
+            continue
+        if _hint_key(c) in already:
+            stats["already_routed"] += 1
             continue
         if _covered(c, findings_by_gid.get(owner, [])):
             stats["covered"] += 1
@@ -426,7 +450,22 @@ def cmd_route_hints(args):
             "hint": c["hint"], "from_group": src_gid})
         stats["routed"] += 1
 
-    hints_dir = os.path.join(run_dir, "hints")
+    if residue_mode:
+        # 잔여 힌트 검사: sweep 병합이 base 로 옮긴 미소진 cross_refs 를 걸러
+        # hints/residue.json 에 기록만 한다(추가 sweep 라운드 없음 — 재귀 방지).
+        # 빈 목록도 기록한다(검사 수행 증거). build_report 가 요약부에 표면화한다.
+        residue = [dict(h, owner_group=owner)
+                   for owner in sorted(routed) for h in routed[owner]]
+        save_json(os.path.join(hints_dir, "residue.json"), {"hints": residue})
+        append_issue(run_dir, "sweep", None, "script",
+                     f"잔여 힌트 검사: {stats} — 미소진 {len(residue)}건",
+                     "route-hints --residue-check (추가 sweep 라운드 없이 "
+                     "보고서 표면화 대상)",
+                     "hints/residue.json 기록", "완료")
+        print(json.dumps({"stats": stats, "residue": residue},
+                         ensure_ascii=False))
+        return 0
+
     for owner, hints in routed.items():
         save_json(os.path.join(hints_dir, f"{owner}.json"),
                   {"group_id": owner, "hints": hints})
@@ -495,8 +534,11 @@ def cmd_merge(args):
         for f in add.get("findings", []):
             if f["id"] in base_ids:
                 raise SystemExit(f"[merge:FAIL] ID 충돌 {f['id']} — 접두사 규약 위반")
-            if kind == "second" and any(_overlap(f, e) and f["category"] == e["category"]
-                                        for e in base["findings"]):
+            # 위치 중첩+동일 category 중복 제거는 sweep·second 공통이다: 2차 패스가
+            # sweep 보다 먼저 병합되므로(SKILL.md 2.5 순서), 나중에 병합되는 sweep
+            # 발견도 기존(1차+2차) 발견과 겹치면 걸러야 중복 보고가 안 생긴다.
+            if any(_overlap(f, e) and f["category"] == e["category"]
+                   for e in base["findings"]):
                 skipped += 1
                 continue
             base["findings"].append(f)
@@ -506,11 +548,26 @@ def cmd_merge(args):
         after_ids = {f["id"] for f in base["findings"]}
         missing = base_ids_before - after_ids
         _req(not missing, f"기존 발견 소실: {sorted(missing)}")
+        # cross_refs 보존 병합 — sweep/2차 헌터가 남긴 힌트를 base 로 옮긴다.
+        # 옮기지 않으면 route-hints 가 중간 산출(.sweep/.second)을 읽지 않으므로
+        # 힌트가 파일에서 사장된다(잔여 검사 --residue-check 의 입력이 여기다).
+        base_crefs = base.get("cross_refs") or []
+        seen_keys = {_hint_key(c) for c in base_crefs}
+        crefs_added = 0
+        for c in add.get("cross_refs", []) or []:
+            if _hint_key(c) in seen_keys:
+                continue
+            base_crefs.append(c)
+            seen_keys.add(_hint_key(c))
+            crefs_added += 1
+        base["cross_refs"] = base_crefs
         save_json(base_path, base)
         append_issue(run_dir, kind, gid, "script",
-                     f"{kind} 병합: +{added} 중복스킵 {skipped}", "merge",
+                     f"{kind} 병합: +{added} 중복스킵 {skipped} "
+                     f"cross_refs +{crefs_added}", "merge",
                      "defects/<gid>.json 갱신", "완료")
-        print(f"[merge] {kind} g{gid}: +{added}, skipped {skipped}")
+        print(f"[merge] {kind} g{gid}: +{added}, skipped {skipped}, "
+              f"cross_refs +{crefs_added}")
         return 0
 
     if kind == "verify":
@@ -620,6 +677,9 @@ def main(argv=None):
     r = sub.add_parser("route-hints", help="cross_refs → hints/<gid>.json")
     r.add_argument("--run-dir", required=True)
     r.add_argument("--groups-file", default=None)
+    r.add_argument("--residue-check", action="store_true",
+                   help="라우팅 대신 미소진 힌트를 hints/residue.json 에 기록"
+                        "(전 sweep 병합 후 실행 — 보고서 표면화 대상)")
     r.set_defaults(func=cmd_route_hints)
 
     e = sub.add_parser("extract-claims", help="defects → claims/<gid>.json")

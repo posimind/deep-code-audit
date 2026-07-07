@@ -74,6 +74,14 @@ def collect(run_dir):
     return confirmed, fp_count
 
 
+def residue_hints(run_dir):
+    """sweep 병합 후 미소진 힌트(hints/residue.json — route-hints --residue-check)."""
+    p = os.path.join(run_dir, "hints", "residue.json")
+    if not os.path.exists(p):
+        return []
+    return load_json(p).get("hints", [])
+
+
 def failed_groups(run_dir):
     st_path = os.path.join(run_dir, "state.json")
     if not os.path.exists(st_path):
@@ -191,6 +199,19 @@ def render_summary(run_dir, confirmed, fp_count, split):
         L.append(f"- ⚠️ **검증 불능 그룹**(재시도·폴백까지 실패): {', '.join(failed)} "
                  f"— 해당 그룹은 감사 공백이므로 수동 확인 권장")
     L.append("")
+    residue = residue_hints(run_dir)
+    if residue:
+        L.append("## 미소진 힌트 (추가 확인 권장 지점)")
+        L.append("")
+        L.append("보강 패스(sweep) 헌터가 조사 중 새로 남긴 타 그룹 결함 징후로, 이번 "
+                 "런의 자동 조사가 소진하지 못한 힌트다. 검증을 거치지 않은 의심 "
+                 "신호이므로 발견이 아닌 수동 확인 후보로 다뤄라:")
+        L.append("")
+        for h in residue:
+            cat = CAT_KO.get(h.get("category", ""), h.get("category", "?"))
+            L.append(f"- `{h.get('file', '?')}:{h.get('line', '?')}` [{cat}] "
+                     f"{h.get('hint', '')} (g{h.get('from_group', '?')} 발신)")
+        L.append("")
     excluded = gj.get("excluded", [])
     if excluded:
         L.append("## 감사 범위 제외")

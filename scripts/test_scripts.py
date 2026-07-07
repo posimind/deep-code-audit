@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -38,6 +40,14 @@ def wj(path, obj):
 def rj(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def run_capture(fn, *a):
+    """cmd_* 를 stdout 캡처와 함께 호출, 출력의 JSON 마지막 줄을 파싱해 반환."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*a)
+    return json.loads(buf.getvalue().strip().splitlines()[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +695,70 @@ class TestRouteAndMergeAndClaims(unittest.TestCase):
         vo.cmd_route_hints(_ns(run_dir=self.run, groups_file=None))
         self.assertFalse(os.path.exists(os.path.join(self.run, "hints", "5.json")))
 
+    def test_route_hints_already_routed_skipped(self):
+        # 재실행(재개) 시 이미 라우팅된 힌트는 재소비하지 않는다(멱등).
+        wj(os.path.join(self.run, "defects", "3.json"), base_defects(3))
+        wj(os.path.join(self.run, "defects", "5.json"),
+           {"group_id": 5, "findings": [], "coverage": [], "cross_refs": [],
+            "issues": []})
+        run_capture(vo.cmd_route_hints, _ns(run_dir=self.run, groups_file=None))
+        out = run_capture(vo.cmd_route_hints,
+                          _ns(run_dir=self.run, groups_file=None))
+        self.assertEqual(out["stats"]["already_routed"], 1)
+        self.assertEqual(out["stats"]["routed"], 0)
+        h = rj(os.path.join(self.run, "hints", "5.json"))
+        self.assertEqual(len(h["hints"]), 1)  # 1차 파일 보존
+
+    def _route_then_sweep_residue(self):
+        """1차 라우팅 → sweep 이 새 cross_ref 를 남김 → 병합 → 잔여 검사."""
+        wj(os.path.join(self.run, "defects", "3.json"), base_defects(3))
+        wj(os.path.join(self.run, "defects", "5.json"),
+           {"group_id": 5, "findings": [], "coverage": [], "cross_refs": [],
+            "issues": []})
+        run_capture(vo.cmd_route_hints, _ns(run_dir=self.run, groups_file=None))
+        sweep = {"group_id": 3, "findings": [], "coverage": [],
+                 "cross_refs": [{"file": "db/conn.py", "line": 40,
+                                 "category": "resource",
+                                 "hint": "커서 미해제 의심"}], "issues": []}
+        wj(os.path.join(self.run, "defects", "3.sweep.json"), sweep)
+        with contextlib.redirect_stdout(io.StringIO()):
+            vo.cmd_merge(_ns(kind="sweep", group="3", run_dir=self.run))
+        return run_capture(
+            vo.cmd_route_hints,
+            _ns(run_dir=self.run, groups_file=None, residue_check=True))
+
+    def test_residue_check(self):
+        # sweep 이 남긴 cross_refs: merge 로 base 에 보존 → 라우팅 라운드가 없으므로
+        # --residue-check 가 hints/residue.json 으로 표면화한다(사장 금지).
+        out = self._route_then_sweep_residue()
+        self.assertEqual(out["stats"]["already_routed"], 1)  # 1차 라우팅분
+        res = rj(os.path.join(self.run, "hints", "residue.json"))
+        self.assertEqual(len(res["hints"]), 1)
+        self.assertEqual(res["hints"][0]["line"], 40)
+        self.assertEqual(res["hints"][0]["owner_group"], "5")
+        # 잔여 검사는 소비용 힌트 파일을 새로 만들지 않는다.
+        h5 = rj(os.path.join(self.run, "hints", "5.json"))
+        self.assertEqual(len(h5["hints"]), 1)
+        self.assertFalse(os.path.exists(os.path.join(self.run, "hints", "3.json")))
+
+    def test_residue_closed_for_later_routing(self):
+        # 잔여 검사 뒤의 일반 라우팅 재실행(재개)은 residue 힌트를 재라우팅하지
+        # 않는다 — "sweep 라운드 1회" 불변식 유지 + 1차 힌트 파일 덮어쓰기 방지.
+        # 잔여 검사 재실행은 같은 잔여를 재산출한다(빈 목록으로 덮어쓰지 않음).
+        self._route_then_sweep_residue()
+        out = run_capture(vo.cmd_route_hints,
+                          _ns(run_dir=self.run, groups_file=None))
+        self.assertEqual(out["stats"]["routed"], 0)
+        self.assertEqual(out["stats"]["already_routed"], 2)  # 1차분 + residue분
+        h5 = rj(os.path.join(self.run, "hints", "5.json"))
+        self.assertEqual(h5["hints"][0]["line"], 15)  # 1차 파일 원형 유지
+        out2 = run_capture(
+            vo.cmd_route_hints,
+            _ns(run_dir=self.run, groups_file=None, residue_check=True))
+        self.assertEqual(len(out2["residue"]), 1)
+        res = rj(os.path.join(self.run, "hints", "residue.json"))
+        self.assertEqual(res["hints"][0]["line"], 40)
+
     def test_extract_claims(self):
         wj(os.path.join(self.run, "defects", "3.json"), base_defects(3))
         vo.cmd_extract_claims(_ns(run_dir=self.run, group="3"))
@@ -725,6 +799,52 @@ class TestRouteAndMergeAndClaims(unittest.TestCase):
         wj(os.path.join(self.run, "defects", "3.sweep.json"), sweep)
         with self.assertRaises(SystemExit):
             vo.cmd_merge(_ns(kind="sweep", group="3", run_dir=self.run))
+
+    def test_merge_sweep_location_dedupe(self):
+        # 2차 패스가 먼저 병합되는 순서에서 마지막에 병합되는 sweep 발견도
+        # 위치 중첩+동일 category 를 걸러야 중복 보고가 없다(다른 category 는 보존).
+        wj(os.path.join(self.run, "defects", "3.json"), base_defects(3))
+        sweep = {"group_id": 3, "findings": [
+            {"id": "g3-w001", "pass": "sweep", "category": "security",
+             "severity": "major", "confidence": "medium",
+             "location": {"file": "api/search.py", "start": 44, "end": 46,
+                          "symbol": "h"},
+             "claim": "동일 SQLi", "rationale": "r", "snippet": "s",
+             "evidence_files": []},
+            {"id": "g3-w002", "pass": "sweep", "category": "fault",
+             "severity": "major", "confidence": "medium",
+             "location": {"file": "api/search.py", "start": 44, "end": 46,
+                          "symbol": "h"},
+             "claim": "다른 결함", "rationale": "r", "snippet": "s",
+             "evidence_files": []}], "coverage": [], "cross_refs": [],
+            "issues": []}
+        wj(os.path.join(self.run, "defects", "3.sweep.json"), sweep)
+        with contextlib.redirect_stdout(io.StringIO()):
+            vo.cmd_merge(_ns(kind="sweep", group="3", run_dir=self.run))
+        merged = rj(os.path.join(self.run, "defects", "3.json"))
+        ids = {f["id"] for f in merged["findings"]}
+        self.assertNotIn("g3-w001", ids)  # 위치+category 중복 → 스킵
+        self.assertIn("g3-w002", ids)     # 다른 category → 보존
+
+    def test_merge_preserves_cross_refs(self):
+        # sweep/2차의 cross_refs 는 base 로 보존 병합된다(중복 file+line+category 스킵).
+        wj(os.path.join(self.run, "defects", "3.json"), base_defects(3))
+        sweep = {"group_id": 3, "findings": [], "coverage": [],
+                 "cross_refs": [
+                     {"file": "db/conn.py", "line": 15, "category": "concurrency",
+                      "hint": "중복 힌트"},  # base 와 동일 키 → 스킵
+                     {"file": "db/conn.py", "line": 40, "category": "resource",
+                      "hint": "커서 미해제 의심"}], "issues": []}
+        wj(os.path.join(self.run, "defects", "3.sweep.json"), sweep)
+        with contextlib.redirect_stdout(io.StringIO()):
+            vo.cmd_merge(_ns(kind="sweep", group="3", run_dir=self.run))
+        merged = rj(os.path.join(self.run, "defects", "3.json"))
+        keys = {(c["file"], c["line"], c["category"])
+                for c in merged["cross_refs"]}
+        self.assertEqual(keys, {("db/conn.py", 15, "concurrency"),
+                                ("db/conn.py", 40, "resource")})
+        # 기존 힌트 문구 보존(중복 키는 base 우선).
+        self.assertEqual(merged["cross_refs"][0]["hint"], "전역 커넥션 락 없음")
 
     def test_merge_verify_batches(self):
         for n in (1, 2):
@@ -868,6 +988,22 @@ class TestBuildReport(unittest.TestCase):
         self.assertIn("[조건부]", text)
         self.assertIn("②reachable", text)
         self.assertIn("④no_guard", text)
+
+    def test_residue_section(self):
+        # 미소진 힌트가 있으면 요약부에 표면화, 없으면(파일 부재) 절 자체가 없다.
+        self._seed(3)
+        build_report.main(["--run-dir", self.run])
+        path = os.path.join(self.run, "감사보고서.md")
+        self.assertNotIn("미소진 힌트", open(path, encoding="utf-8").read())
+        wj(os.path.join(self.run, "hints", "residue.json"),
+           {"hints": [{"file": "db/conn.py", "line": 40, "category": "resource",
+                       "hint": "커서 미해제 의심", "from_group": "3",
+                       "owner_group": "5"}]})
+        build_report.main(["--run-dir", self.run])
+        text = open(path, encoding="utf-8").read()
+        self.assertIn("미소진 힌트", text)
+        self.assertIn("`db/conn.py:40`", text)
+        self.assertIn("리소스", text)
 
     def test_split_over_threshold(self):
         self._seed(18)  # >15 → 분할

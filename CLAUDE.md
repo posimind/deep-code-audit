@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
 (orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
-(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 34 unit
+(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 54 unit
 tests, standard library only). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
@@ -25,13 +25,13 @@ mode concatenates the two on the fly only under explicit user consent (see Stage
 no sync step. The dedicated agents need a **second symlink**,
 `~/.claude/agents/deep-code-audit → <repo>/agents` (user-scope agents dir is recursively
 scanned; identifier = frontmatter `name`, not path). Agents installed after a session
-starts are not recognized until restart — Stage 0 preflight checks this. A field-test run
-directory (`.deep-code-audit/20260702-233848/`, target: ssam) exists at the root with the
-problem-analysis report that motivated the Rust-parser improvement round.
+starts are not recognized until restart — Stage 0 preflight checks this. (A field-test run
+against the ssam repo, 2026-07-02, produced the problem-analysis report that motivated the
+Rust-parser improvement round; its run directory is no longer kept in this repo.)
 
 ### Commands
 
-- **Unit tests** (34, no external deps): `python3 scripts/test_scripts.py`
+- **Unit tests** (54, no external deps): `python3 scripts/test_scripts.py`
 - **Compile check**: `python3 -m py_compile scripts/*.py`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
@@ -68,10 +68,13 @@ separate subagent and completed stages can be skipped on resume:
                        - may only REPORT findings whose defect line lives in its own group
                        - asymmetric recording; per-file coverage evidence
                        ──▶ defects/<group_id>.json
-[2.5] Reinforcement   route unconsumed cross_refs hints to owning-group sweep agents;
-                       critical-only second-pass hunter on high_risk groups;
-                       independent outputs merged by script (dedupe + ID/superset checks)
-                       ──▶ defects/<group_id>.json (updated)
+[2.5] Reinforcement   critical-only second-pass hunter on high_risk groups FIRST (merged so
+                       its cross_refs join routing); then route unconsumed cross_refs hints
+                       to owning-group sweep agents; independent outputs merged by script
+                       (dedupe + ID/superset checks + cross_refs preservation); finally
+                       route-hints --residue-check records hints left unconsumed after the
+                       single sweep round (surfaced in the report, never silently dropped)
+                       ──▶ defects/<group_id>.json (updated) + hints/residue.json
 [3] Adversarial verify fresh-context verifier per group; anti-anchoring protocol
                        (claims embedded without rationale; re-derive all findings before
                        opening the hunter's file); tri-state rubric with gates,
@@ -110,9 +113,16 @@ Key design decisions worth preserving when modifying this skill:
   the file exists, fresh spawn on no-output/crash, then bisect/batch-shrink fallback,
   then `failed` in state.json → reported as an unverifiable group, never silently dropped).
 - **Read scope vs. report scope are deliberately different** per hunting subagent:
-  unrestricted reading avoids false positives from missing cross-file context, while
-  restricted reporting prevents duplicate/overlapping reports. Cross-group suspicions go
-  into `cross_refs` hints, which stage 2.5 explicitly consumes (they must not die on disk).
+  unrestricted reading serves both directions — checking upstream guards/call contracts
+  cuts false positives, and tracing flows that start or end outside the group (hypothesis
+  formation, not just confirmation) cuts false negatives; hunters are told not to stop a
+  trace at the group boundary, and that seam_hints only mark statically-cut import edges
+  (parser-invisible couplings — dynamic dispatch, DI, config wiring, IPC — must be crossed
+  unprompted). Restricted reporting prevents duplicate/overlapping reports and is
+  machine-enforced at validation. Cross-group suspicions go into `cross_refs` hints, which
+  stage 2.5 explicitly consumes (they must not die on disk): merge preserves sweep/second
+  cross_refs into the base file, and hints still unconsumed after the single sweep round
+  are recorded by `--residue-check` and surfaced in the report.
 - **Judgment belongs to the model, scripts do only deterministic work.** Project
   classification and finding scoring live in prompts, not heuristics; the 4 scripts are
   `select_targets.py`, `group_by_lines.py` (`build`/`subgroup`), `validate_output.py`
