@@ -518,6 +518,34 @@ class TestValidateDefects(unittest.TestCase):
                 issues = [json.loads(ln) for ln in fh if ln.strip()]
             self.assertFalse([it for it in issues if "자기중복" in it["context"]])
 
+    def test_english_prose_warns_but_passes(self):
+        # 산문 필드(claim/rationale)에 한글 전무 → 불합격 아님, issues.jsonl 경고
+        # (영어 드리프트 표면화 — 판단은 모델 몫).
+        d = base_defects(3)
+        d["coverage"].append({"path": "api/filters.py", "role": "상수",
+                              "top_risk": "특이점 없음"})
+        d["findings"][0]["claim"] = "HTTP parameter concatenated into SQL"
+        d["findings"][0]["rationale"] = "q flows into f-string SQL unvalidated"
+        self._validate("hunt", 3, d)  # 경고일 뿐 실패 아님
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["hunt"]["3"], "done")
+        with open(os.path.join(self.run, "issues.jsonl"), encoding="utf-8") as fh:
+            issues = [json.loads(ln) for ln in fh if ln.strip()]
+        warn = [it for it in issues if "산출 언어" in it["context"]]
+        self.assertEqual(len(warn), 1)
+        self.assertIn("g3-001", warn[0]["symptom"])
+
+    def test_korean_prose_no_language_warn(self):
+        d = base_defects(3)  # claim/rationale 한국어
+        d["coverage"].append({"path": "api/filters.py", "role": "상수",
+                              "top_risk": "특이점 없음"})
+        self._validate("hunt", 3, d)
+        issues_path = os.path.join(self.run, "issues.jsonl")
+        if os.path.exists(issues_path):
+            with open(issues_path, encoding="utf-8") as fh:
+                issues = [json.loads(ln) for ln in fh if ln.strip()]
+            self.assertFalse([it for it in issues if "산출 언어" in it["context"]])
+
     def test_low_downgrade(self):
         # db/conn.py 를 low 로 바꾼 그룹에서 critical → minor 강등.
         gj = groups_fixture(self.run)
@@ -660,6 +688,27 @@ class TestValidateVerified(unittest.TestCase):
         ipath = os.path.join(self.run, "issues.jsonl")
         if os.path.exists(ipath):
             self.assertNotIn("impact 누락", open(ipath, encoding="utf-8").read())
+
+    def test_verify_english_prose_warns_but_passes(self):
+        # rederivation/failure_scenario/impact 에 한글 전무 → 불합격 아님, 경고.
+        obj = self._full_confirmed(
+            rederivation="re-derived from code independently",
+            failure_scenario="GET /search leaks the whole table",
+            impact="anyone can exfiltrate customer data")
+        self._v(obj)
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["verify"]["3"], "done")
+        issues = open(os.path.join(self.run, "issues.jsonl"),
+                      encoding="utf-8").read()
+        self.assertIn("산출 언어", issues)
+        self.assertIn("g3-010", issues)
+
+    def test_verify_korean_prose_no_language_warn(self):
+        obj = self._full_confirmed(impact="로그인 없이 고객 정보가 유출된다")
+        self._v(obj)
+        ipath = os.path.join(self.run, "issues.jsonl")
+        if os.path.exists(ipath):
+            self.assertNotIn("산출 언어", open(ipath, encoding="utf-8").read())
 
     def test_rule6_reachable_met_needs_entry_path(self):
         obj = self._full_confirmed()
