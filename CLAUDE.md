@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
 (orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
-(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 57 unit
+(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 63 unit
 tests, standard library only). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
@@ -31,7 +31,7 @@ Rust-parser improvement round; its run directory is no longer kept in this repo.
 
 ### Commands
 
-- **Unit tests** (57, no external deps): `python3 scripts/test_scripts.py`
+- **Unit tests** (63, no external deps): `python3 scripts/test_scripts.py`
 - **Compile check**: `python3 -m py_compile scripts/*.py`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
@@ -82,7 +82,10 @@ separate subagent and completed stages can be skipped on resume:
                        critical/major, lightweight batch check for minor
                        ──▶ verified/<group_id>.json
 [4] Report            build_report joins verified+defects and renders Korean markdown
-                       (snippet, mechanism, failure scenario, fix sample per finding);
+                       aimed at reviewers unfamiliar with the codebase (claim as title,
+                       file role, impact line, snippet, entry path, mechanism, failure
+                       scenario, collapsible verification note, fix sample per finding;
+                       summary carries a terminology legend + findings index table);
                        critical→major→minor; split into 3 files past ~15 findings
                        ──▶ 감사보고서.md (or 00_요약.md / 01_critical_major.md / 02_minor.md)
 ```

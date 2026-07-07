@@ -644,6 +644,23 @@ class TestValidateVerified(unittest.TestCase):
         base.update(over)
         return {"group_id": 3, "results": [base], "issues": []}
 
+    def test_impact_missing_warns_but_passes(self):
+        # confirmed critical/major 에 impact 없음 → 불합격 아님, issues.jsonl 경고.
+        obj = self._full_confirmed()
+        self._v(obj)
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["verify"]["3"], "done")
+        issues = open(os.path.join(self.run, "issues.jsonl"),
+                      encoding="utf-8").read()
+        self.assertIn("impact 누락", issues)
+
+    def test_impact_present_no_warn(self):
+        obj = self._full_confirmed(impact="로그인 없이 고객 정보가 유출된다")
+        self._v(obj)
+        ipath = os.path.join(self.run, "issues.jsonl")
+        if os.path.exists(ipath):
+            self.assertNotIn("impact 누락", open(ipath, encoding="utf-8").read())
+
     def test_rule6_reachable_met_needs_entry_path(self):
         obj = self._full_confirmed()
         del obj["results"][0]["entry_path"]
@@ -1015,8 +1032,67 @@ class TestBuildReport(unittest.TestCase):
         build_report.main(["--run-dir", self.run])
         path = os.path.join(self.run, "감사보고서.md")
         self.assertTrue(os.path.exists(path))
-        # 전 기준 met → 조건부 배지 없음.
-        self.assertNotIn("[조건부]", open(path, encoding="utf-8").read())
+        # 전 기준 met → 조건부 인용 블록 없음("[조건부]" 자체는 범례에 항상 등장).
+        self.assertNotIn("미확정(unknown) 기준", open(path, encoding="utf-8").read())
+
+    def test_reader_format_elements(self):
+        # 낯선 독자용 요소: claim 제목, 범례, 색인 표, 언어 태그, 도달 경로, 검증 노트.
+        self._seed(3)
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertIn("### 1. 🔴 c", text)            # 제목 = claim(위치 아님)
+        self.assertIn("이 보고서를 읽는 법", text)     # 용어 범례
+        self.assertIn("## 발견 목록", text)            # 색인 표
+        self.assertIn("| `g3-000` |", text)
+        self.assertIn("```python", text)               # .py → 언어 태그
+        self.assertIn("**도달 경로**", text)
+        self.assertIn("main → h:1", text)
+        self.assertIn("검증 노트", text)               # 접이식 검증 증거
+        self.assertIn("반론 — 실패", text)
+        self.assertIn("- 호출부", text)                # guard_scan 목록
+
+    def test_claim_fallback_to_location(self):
+        # claim 없는 구 런 산출 → 제목이 위치로 폴백.
+        self._seed(1)
+        dpath = os.path.join(self.run, "defects", "3.json")
+        d = rj(dpath)
+        d["findings"][0]["claim"] = ""
+        wj(dpath, d)
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertIn("### 1. 🔴 `api/search.py:1` · `h`", text)
+
+    def test_appraisal_string_items_tolerated(self):
+        # validate 는 appraisal 을 리스트 여부만 검사 → 문자열 항목이 스키마를
+        # 통과할 수 있다(중복 기각 테스트가 실제 사례). 렌더가 죽으면 안 된다.
+        self._seed(1)
+        vpath = os.path.join(self.run, "verified", "3.json")
+        v = rj(vpath)
+        v["results"][0]["appraisal"] = ["문자열 형태의 확인 이력",
+                                        {"item": "항목", "evidence": "근거"}]
+        wj(vpath, v)
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertIn("- 문자열 형태의 확인 이력", text)
+        self.assertIn("- 항목: 근거", text)
+
+    def test_impact_and_file_role(self):
+        # impact/coverage role 이 있으면 렌더, 없는 발견에는 항목 자체가 생략.
+        self._seed(2)  # g3-000 critical, g3-001 major
+        dpath = os.path.join(self.run, "defects", "3.json")
+        d = rj(dpath)
+        d["coverage"] = [{"path": "api/search.py", "role": "검색 API HTTP 핸들러",
+                          "top_risk": "g3-000"}]
+        wj(dpath, d)
+        vpath = os.path.join(self.run, "verified", "3.json")
+        v = rj(vpath)
+        v["results"][0]["impact"] = "로그인 없이 고객 정보가 유출된다"
+        wj(vpath, v)
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertIn("**파일 역할**: 검색 API HTTP 핸들러", text)
+        self.assertIn("로그인 없이 고객 정보가 유출된다", text)
+        self.assertEqual(text.count("**영향**"), 1)  # impact 없는 발견은 생략
 
     def test_conditional_badge_on_unknown(self):
         # unknown 이 남은 confirmed → [조건부] 배지 + unknown 기준 나열.

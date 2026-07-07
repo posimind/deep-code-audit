@@ -229,6 +229,8 @@ def validate_result(r, i):
         _req(val in TRISTATE, f"{tag}.criteria.{key} ∈ {sorted(TRISTATE)} 필요")
     _req(r.get("severity_final") in SEVERITIES,
          f"{tag}.severity_final ∈ {sorted(SEVERITIES)} 필요")
+    if "impact" in r:
+        _req(isinstance(r["impact"], str), f"{tag}.impact 문자열 필요")
 
     if r["rubric"] == "full":
         for c in FULL_CRITERIA:
@@ -347,6 +349,24 @@ def cmd_validate(args):
     try:
         if stage == "verify":
             validate_verified(obj)
+            # impact 누락 경고(불합격 아님 — 구 런 재개 호환). impact 는 보고서의
+            # 독자용 "실질 영향 한 줄"이라 없어도 정합성은 깨지지 않지만, 누락은
+            # 보고 품질의 조용한 저하이므로 issues.jsonl 에 남겨 추적한다.
+            no_impact = [r["id"] for r in obj["results"]
+                         if r["verdict"] == "confirmed"
+                         and r.get("severity_final") in ("critical", "major")
+                         and not (isinstance(r.get("impact"), str)
+                                  and r["impact"].strip())]
+            if no_impact:
+                append_issue(run_dir, stage, gid, "script",
+                             f"confirmed critical/major 에 impact 누락 "
+                             f"{len(no_impact)}건: {no_impact}",
+                             "validate impact 존재 검사",
+                             "경고만 기록(불합격 아님) — 보고서는 영향 항목 없이 렌더",
+                             "보고서 가독성 저하 감수 또는 재요청 판단은 오케스트레이터 몫")
+                print(f"[validate:WARN] verify g{gid}: confirmed critical/major "
+                      f"impact 누락 {no_impact} — 보고서에 '영향' 항목이 빠진다",
+                      file=sys.stderr)
         else:
             require_cov = (stage == "hunt") and not args.no_coverage
             validate_defects(obj, files_set, require_cov,

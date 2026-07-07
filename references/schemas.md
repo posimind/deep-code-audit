@@ -195,6 +195,7 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
                    "no_guard": "met", "survives_rebuttal": "met"},
       "severity_final": "critical",
       "failure_scenario": "GET /search?q=' OR '1'='1 요청 시 WHERE 절이 항상 참이 되어 전체 테이블이 유출된다.",
+      "impact": "로그인 없이 누구나 고객 개인정보 전체를 빼갈 수 있다.",
       "entry_path": "main → route /search → handle_search:42 → cursor.execute:47",
       "guard_scan": ["app.py 미들웨어 체인", "nginx.conf", "handle_search 호출부 2곳"],
       "rebuttal": "최강 반론: ORM 계층이 이스케이프할 것 — 실패: 이 경로는 raw cursor 직접 사용, ORM 미경유(db/conn.py:12)",
@@ -272,6 +273,11 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
   `failure_scenario`에 그 전제를 명시하고, 보고서는 **[조건부]** 배지 + unknown 기준
   나열로 렌더링한다(`build_report.py`).
 - `fix_sample`/`fix_direction`: confirmed에 권장(보고서 렌더링에 사용).
+- `impact`: **confirmed critical/major 에 필수적 권장** — 코드베이스에 낯선 검토자를
+  위한 "실제로 무슨 일이 나는가" 한 줄(피해 주체·자산을 비전문 언어로).
+  `failure_scenario` 가 재현 관점(어떤 입력 → 어떤 잘못된 결과)이라면 `impact` 는 그
+  결과가 갖는 의미다. 누락은 스키마 불합격이 아니라 **경고**(issues.jsonl 기록 — 구 런
+  하위 호환)이며, 보고서는 '영향' 항목을 생략하고 렌더한다.
 - 묶음 분할 검증은 `verified/<gid>.batch-N.json`에 동일 스키마로 쓰고
   `validate_output.py`가 `verified/<gid>.json`으로 병합한다.
 

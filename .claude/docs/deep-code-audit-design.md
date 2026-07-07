@@ -339,12 +339,20 @@ confirmed 판정 3규칙(모두 통과 필수): **게이트**(unmet 1건 확정 
 ### Stage 4 — 보고서 생성 (`build_report.py`)
 
 `verified/*.json`을 `defects/*.json`과 id로 조인해 **한국어** 보고서를 렌더링한다
-(대상 코드베이스의 언어와 무관). 발견별 필수 요소: 위치(파일:라인, 심볼)·심각도·검증
-점수, 결함 코드 스닙, 메커니즘, **실패 시나리오**(재현 관점), **개선 코드 샘플**과
-개선 방향. 정렬은 critical→major→minor. **15건 초과 시 3분할**(`00_요약.md` /
-`01_critical_major.md` / `02_minor.md` — minor가 다수여도 격리되어 critical/major
-대응을 방해하지 않음), 이하면 `감사보고서.md` 단일 파일. 요약부에는 감사 범위(배제
-목록), 통계, **검증 불능 그룹**(감사 공백 — 수동 확인 권장)을 명시한다. 서식 명세는
+(대상 코드베이스의 언어와 무관). 서식의 기준 독자는 **코드베이스에 낯선 검토자**다 —
+파이프라인이 이미 생산하는 독자용 정보를 렌더링에서 버리지 않는 것이 원칙이다(claim·
+entry_path·rebuttal·guard_scan·coverage role 은 한때 미렌더링으로 사장되던 필드였다).
+발견별 요소: **제목 = claim**(위치 아님 — 위치로 폴백), 위치(파일:라인, 심볼)·심각도·
+검증 점수, **파일 역할**(헌터 coverage 조인), **영향**(`impact` — 검증자가 쓰는 비전문
+언어 한 줄, critical/major 권장·누락은 validate 경고), 결함 코드 스닙(확장자 유래 언어
+태그), **도달 경로**(`entry_path`), 메커니즘, **실패 시나리오**(재현 관점), 접이식
+**검증 노트**(rebuttal·guard_scan·appraisal — 오탐 의심 검토자용 근거), **개선 코드
+샘플**과 개선 방향. 요약부에는 접이식 **용어 범례**("이 보고서를 읽는 법")와 **발견
+색인 표**(ID·심각도·분류·요지·위치)를 싣는다. 정렬은 critical→major→minor. **15건
+초과 시 3분할**(`00_요약.md` / `01_critical_major.md` / `02_minor.md` — minor가
+다수여도 격리되어 critical/major 대응을 방해하지 않음), 이하면 `감사보고서.md` 단일
+파일. 요약부에는 감사 범위(배제 목록), 통계, **검증 불능 그룹**(감사 공백 — 수동 확인
+권장)도 명시한다. 서식 명세는
 [references/report-format.md](../../references/report-format.md).
 
 ## 5. 오케스트레이션 정책
@@ -412,7 +420,7 @@ scripts/                     # 표준 라이브러리만 사용, 단독 실행 C
                              #   / merge(sweep·second·verify) / log-issue — 스키마·일관성 검증,
                              #   low 강등, coverage 대조, ID 유일성·상위집합 검사, issues 병합
   build_report.py            # verified+defects 조인 → 한국어 보고서 렌더·분할
-  test_scripts.py            # 단위 테스트 54종 (파서·그룹핑·검증·병합·라우팅·보고서·저하 감지)
+  test_scripts.py            # 단위 테스트 63종 (파서·그룹핑·검증·병합·라우팅·보고서·저하 감지)
 ```
 
 검증 명령: `python3 scripts/test_scripts.py` (외부 의존성 없음),
