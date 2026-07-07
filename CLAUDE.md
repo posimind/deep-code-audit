@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
 (orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
-(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 54 unit
+(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 57 unit
 tests, standard library only). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
@@ -31,7 +31,7 @@ Rust-parser improvement round; its run directory is no longer kept in this repo.
 
 ### Commands
 
-- **Unit tests** (54, no external deps): `python3 scripts/test_scripts.py`
+- **Unit tests** (57, no external deps): `python3 scripts/test_scripts.py`
 - **Compile check**: `python3 -m py_compile scripts/*.py`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
@@ -164,7 +164,12 @@ Key design decisions worth preserving when modifying this skill:
 - **Sweep/second-pass/batch outputs are written to separate files** and merged by
   `validate_output.py` (location-overlap + category dedupe, ID-prefix uniqueness, superset
   preservation of pre-merge finding IDs) — LLM read-modify-rewrite of an existing findings
-  file is a silent-loss channel and is forbidden.
+  file is a silent-loss channel and is forbidden. Duplicates *within* a single hunter
+  output (location-overlap + same category) are only **warned** at validation
+  (issues.jsonl + stderr, no auto-removal — same range/category can hold genuinely
+  distinct defects, so machine removal would be a finding-loss channel); the verifier
+  resolves them (keep one, reject the other as `false_positive` with a duplicate
+  reject_reason — its protocol has an explicit duplicate-handling rule).
 - **Run directories are timestamped** (`<run-id>` = `YYYYMMDD-HHMMSS`) so repeated runs in
   the same workspace stay separate; `state.json` (schema-validation-passed markers, not
   file existence) is the single source of truth for resume and stage completion.

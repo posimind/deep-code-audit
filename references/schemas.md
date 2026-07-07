@@ -168,6 +168,10 @@
   중간 산출을 읽지 않으므로, 옮기지 않으면 힌트가 사장된다.
 - `issues`: 선택. 작업 중 겪은 운용 문제(§5 형식). `validate_output.py`가
   `issues.jsonl`로 병합.
+- 단일 산출 안에서 **위치 중첩 + 동일 `category`** 인 발견 쌍은 validate 가 자기중복
+  의심 **경고만** 남긴다(issues.jsonl + stderr — 자동 제거·불합격 없음: 같은 범위·같은
+  category 의 진짜 별개 결함이 공존할 수 있다). 실제 중복 판정은 검증 단계 몫이다
+  (검증자 프로토콜의 중복 보고 처리 규칙 — 한쪽만 살리고 나머지는 false_positive).
 
 sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
 `defects/<gid>.second.json`에 **동일 스키마**로 기록한다(단 `coverage`는 sweep/2차에서
@@ -261,7 +265,9 @@ sweep/2차 패스 독립 산출은 각각 `defects/<gid>.sweep.json`,
 - `severity_final`: 검증자 재조정 결과. minor를 major/critical로 **격상하면 `rubric`은
   반드시 `full`**(경량 검증만 거친 발견의 상향 보고 방지).
 - `appraisal`: critical/major 감정 보강 이력(unknown 기준 추가 추적). 없으면 `[]`.
-  임계 미달 기각(unmet 없는 full false_positive)에서는 규칙 9에 따라 비어 있으면 안 된다.
+  **unmet 없는 full false_positive**(임계 미달 기각, 그리고 met≥3 이어도 기각하는
+  중복 보고 기각)에서는 규칙 9에 따라 비어 있으면 안 된다 — 중복 기각은 두 클레임이
+  같은 근본 원인임을 확인한 경위를 여기에 남긴다.
 - `criteria`에 unknown이 남은 `confirmed`는 "전제가 참이면 결함"이다 — 검증자는
   `failure_scenario`에 그 전제를 명시하고, 보고서는 **[조건부]** 배지 + unknown 기준
   나열로 렌더링한다(`build_report.py`).

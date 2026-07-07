@@ -480,6 +480,44 @@ class TestValidateDefects(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._validate("hunt", 3, d)
 
+    def test_intra_overlap_same_category_warns_without_removal(self):
+        d = base_defects(3)
+        d["coverage"].append({"path": "api/filters.py", "role": "상수",
+                              "top_risk": "없음"})
+        # 기존 발견(42-48, security)과 범위가 겹치는 동일 category 발견.
+        d["findings"].append({
+            "id": "g3-002", "pass": "primary", "category": "security",
+            "severity": "major", "confidence": "medium",
+            "location": {"file": "api/search.py", "start": 45, "end": 50,
+                         "symbol": "handle_search"},
+            "claim": "c", "rationale": "r", "snippet": "s", "evidence_files": []})
+        self._validate("hunt", 3, d)  # 경고일 뿐 실패 아님
+        out = rj(os.path.join(self.run, "defects", "3.json"))
+        self.assertEqual(len(out["findings"]), 2)  # 자동 제거 금지
+        with open(os.path.join(self.run, "issues.jsonl"), encoding="utf-8") as fh:
+            issues = [json.loads(ln) for ln in fh if ln.strip()]
+        warn = [it for it in issues if "자기중복" in it["context"]]
+        self.assertEqual(len(warn), 1)
+        self.assertIn("g3-001~g3-002", warn[0]["symptom"])
+
+    def test_intra_overlap_different_category_no_warn(self):
+        d = base_defects(3)
+        d["coverage"].append({"path": "api/filters.py", "role": "상수",
+                              "top_risk": "없음"})
+        # 같은 범위라도 category 가 다르면 별개 발견 — 경고 없음.
+        d["findings"].append({
+            "id": "g3-002", "pass": "primary", "category": "resource",
+            "severity": "major", "confidence": "medium",
+            "location": {"file": "api/search.py", "start": 42, "end": 48,
+                         "symbol": "handle_search"},
+            "claim": "c", "rationale": "r", "snippet": "s", "evidence_files": []})
+        self._validate("hunt", 3, d)
+        issues_path = os.path.join(self.run, "issues.jsonl")
+        if os.path.exists(issues_path):
+            with open(issues_path, encoding="utf-8") as fh:
+                issues = [json.loads(ln) for ln in fh if ln.strip()]
+            self.assertFalse([it for it in issues if "자기중복" in it["context"]])
+
     def test_low_downgrade(self):
         # db/conn.py 를 low 로 바꾼 그룹에서 critical → minor 강등.
         gj = groups_fixture(self.run)
@@ -572,6 +610,24 @@ class TestValidateVerified(unittest.TestCase):
             "issues": []}
         with self.assertRaises(SystemExit):
             self._v(obj)  # score 5 인데 met 4
+
+    def test_duplicate_reject_full_met_passes(self):
+        # 중복 보고 기각: unmet 없이 met≥3 이어도 reject_reason + appraisal 이면 유효
+        # (검증자 프로토콜의 중복 처리 규칙 — 기준을 unmet 으로 조작하지 않고 기각).
+        obj = {"group_id": 3, "results": [{
+            "id": "g3-006", "verdict": "false_positive", "rubric": "full", "score": 5,
+            "rederivation": "재도출 — g3-001 과 동일 근본 원인",
+            "entry_path": "main → /search → handle_search:42",
+            "guard_scan": ["호출부"], "rebuttal": "반론 — 실패",
+            "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
+                         "no_guard": "met", "survives_rebuttal": "met"},
+            "severity_final": "critical",
+            "reject_reason": "중복: g3-001 과 동일 결함",
+            "appraisal": ["두 클레임 모두 42-48 f-string SQL 직결 — 동일 근본 원인 확인"]}],
+            "issues": []}
+        self._v(obj)
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["verify"]["3"], "done")
 
     # --- 규칙 6~9 + 게이트 기각 명시 (정탐 정밀도 개선) ---------------------
 

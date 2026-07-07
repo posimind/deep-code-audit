@@ -2,7 +2,8 @@
 """validate_output.py — 단계 인계의 결정적 작업 일체.
 
 판단은 모델에게, 기계적 작업만 스크립트에게. 이 스크립트는 다음만 한다(전부 결정적):
-  validate       스키마 검증 + low 심각도 강등 + coverage 대조 + issues 병합 + state=done
+  validate       스키마 검증 + low 심각도 강등 + coverage 대조 + 자기중복 의심 경고
+                 + issues 병합 + state=done
   route-hints    cross_refs 수집 → 소유 그룹 라우팅 → 커버·기라우팅 대조 →
                  hints/<gid>.json (--residue-check: 미소진 힌트 → hints/residue.json)
   extract-claims defects → claims/<gid>.json (rationale 제거)
@@ -197,6 +198,21 @@ def coverage_gap(obj, core_files):
     return missing
 
 
+def intra_overlap_pairs(findings):
+    """단일 산출 내 위치중첩+동일 category 쌍(자기중복 의심).
+
+    merge 의 그룹 간(pass 간) 중복 제거와 달리 여기서는 자동 제거하지 않는다 —
+    같은 라인 범위에 같은 category 의 진짜 별개 결함이 공존할 수 있어, 기계 제거는
+    발견 소실 채널이 된다. 경고로 표면화하고 판단은 검증 단계에 맡긴다.
+    """
+    pairs = []
+    for i, a in enumerate(findings):
+        for b in findings[i + 1:]:
+            if a["category"] == b["category"] and _overlap(a, b):
+                pairs.append((a["id"], b["id"]))
+    return pairs
+
+
 # --- verified 검증 ---------------------------------------------------------
 
 def validate_result(r, i):
@@ -338,6 +354,20 @@ def cmd_validate(args):
             # low 심각도 강등(결정적 안전망).
             if class_of:
                 apply_low_downgrade(obj, class_of, run_dir, stage, gid)
+            # 자기중복 의심 경고(제거 없음 — intra_overlap_pairs docstring 참조).
+            dup_pairs = intra_overlap_pairs(obj["findings"])
+            if dup_pairs:
+                pairs_str = ", ".join(f"{a}~{b}" for a, b in dup_pairs)
+                append_issue(run_dir, stage, gid, "script",
+                             f"산출 내 위치중첩+동일 category 쌍 {len(dup_pairs)}건: "
+                             f"{pairs_str}",
+                             "validate 자기중복 의심 검사",
+                             "경고만 기록(자동 제거 없음) — 실제 중복이면 검증 단계에서 "
+                             "한쪽을 false_positive 처리",
+                             "검증 단계 판단 대기")
+                print(f"[validate:WARN] {stage} g{gid}: 자기중복 의심 쌍 "
+                      f"{pairs_str} — issues.jsonl 기록, 검증 단계에서 판별됨",
+                      file=sys.stderr)
             # coverage 대조.
             if require_cov and core_files is not None:
                 missing = coverage_gap(obj, core_files)
