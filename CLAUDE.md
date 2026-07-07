@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
 (orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
-(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 63 unit
+(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 67 unit
 tests, standard library only). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
@@ -31,7 +31,7 @@ Rust-parser improvement round; its run directory is no longer kept in this repo.
 
 ### Commands
 
-- **Unit tests** (63, no external deps): `python3 scripts/test_scripts.py`
+- **Unit tests** (67, no external deps): `python3 scripts/test_scripts.py`
 - **Compile check**: `python3 -m py_compile scripts/*.py`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
@@ -185,3 +185,21 @@ Key design decisions worth preserving when modifying this skill:
   the orchestrator and `validate_output.py`; subagents report their problems via an
   `issues` field in their own output JSON, merged at validation time.
 - **Final report language is Korean**, regardless of the audited codebase's language.
+- **Language policy (since 2026-07-07)**: the *instruction layer* is English — SKILL.md
+  body/description, both agent bodies/descriptions, `hunt/verify-task.md`, `schemas.md`
+  rule prose (token cost: instruction files are billed multiplicatively, spawns × turns;
+  the conversion saves ~36% of instruction-layer tokens per run — see
+  `.claude/docs/english-conversion-plan.md`). The *data layer* (prose value fields in
+  output JSON: hunter `claim`/`rationale`/`coverage[].role`/`.top_risk`/`cross_refs[].hint`;
+  verifier `rederivation`/`failure_scenario`/`impact`/`reject_reason`/`rebuttal`/
+  `guard_scan[]`/`appraisal[]`/`fix_direction`; brief `purpose`) and the *render layer*
+  (`build_report.py` literals, `report-format.md`) stay **Korean** — the report is rendered
+  verbatim from these fields, and `rederivation` must share the hunter's language or the
+  anti-parroting similarity check goes blind. Korean deliberately kept inside English
+  files (residual-Hangul-check allowlist): the severity-criteria 3 lines (verbatim 3-way
+  sync with `render_legend`), the Korean trigger phrases in SKILL.md's description,
+  example-JSON prose values in schemas.md (few-shot anchors), script/report literals
+  quoted in SKILL.md, and Korean literals inside language-policy directives
+  (`"특이점 없음"`). `validate_output.py` warns (never fails) when high-signal prose
+  fields (`claim`/`rationale`, `rederivation`/`failure_scenario`/`impact`) contain no
+  Hangul — the standing drift detector for this policy.

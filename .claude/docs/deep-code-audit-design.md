@@ -418,9 +418,10 @@ scripts/                     # 표준 라이브러리만 사용, 단독 실행 C
   group_by_lines.py          # build(응집 그룹핑·최소 절단 분할·seam_hints·cohesion 감지) / subgroup(이분할)
   validate_output.py         # validate / init-state / set-state / route-hints / extract-claims
                              #   / merge(sweep·second·verify) / log-issue — 스키마·일관성 검증,
-                             #   low 강등, coverage 대조, ID 유일성·상위집합 검사, issues 병합
+                             #   low 강등, coverage 대조, ID 유일성·상위집합 검사, issues 병합,
+                             #   산출 언어(고신호 산문 필드 한글 전무) 경고
   build_report.py            # verified+defects 조인 → 한국어 보고서 렌더·분할
-  test_scripts.py            # 단위 테스트 63종 (파서·그룹핑·검증·병합·라우팅·보고서·저하 감지)
+  test_scripts.py            # 단위 테스트 67종 (파서·그룹핑·검증·병합·라우팅·보고서·저하 감지)
 ```
 
 검증 명령: `python3 scripts/test_scripts.py` (외부 의존성 없음),
@@ -494,3 +495,29 @@ scripts/                     # 표준 라이브러리만 사용, 단독 실행 C
    준수·프리플라이트 중단 게이트 동작 확인. 배치는 B안(레포 `agents/` + 사용자 스코프
    심링크) — 스킬 호출명·트리거 identity 불변 유지. A안(플러그인화)은 타인 배포 시점으로
    보류. 계획 원문: `.claude/docs/agent-bundling-plan.md`.
+5. **지시층 영어 전환 (2026-07-07)**: 지시층(SKILL.md 본문·description, 에이전트 본문
+   2종, `hunt/verify-task.md`, `schemas.md` 규칙 산문)을 영어로 전환했다. 근거: Claude
+   토크나이저에서 한글 ~1.2 tok/자 vs 영어 ~0.25 tok/자인데 지시층은 스폰 수 × 턴 수로
+   곱셈 과금된다 — 8그룹·고위험 3그룹 규모 런 기준 지시층 유효 입력 약 940K → 600K
+   토큰(−36%, 런당 ~340K 절감; 전체 런 비용 대비 4~6%, ±30% 오차)으로 추정했다(계획
+   문서 부록 A). **언어 정책 불변식**: 모델에게 주는 지시는 영어, 사람에게 닿는
+   텍스트는 한국어 — 데이터층(산출 JSON 산문 필드: 헌터 `claim`/`rationale`/
+   `coverage[].role`/`.top_risk`/`cross_refs[].hint`, 검증자 `rederivation`/
+   `failure_scenario`/`impact`/`reject_reason`/`rebuttal`/`guard_scan[]`/`appraisal[]`/
+   `fix_direction`, 브리프 `purpose`)과 렌더층(`build_report.py` 리터럴,
+   `report-format.md`, 심각도 기준 3행)은 한국어 유지. `rederivation` 한국어 강제는
+   편승 검사(헌터 `rationale` 과의 자구 유사도)의 전제 조건이다. **영어 파일 안에
+   의도적으로 남긴 한국어**(잔여 한글 검사 허용 목록): 심각도 기준 3행(render_legend
+   와 3곳 자구 동기화), SKILL.md description 의 한국어 트리거 문구, schemas.md 예시
+   JSON 산문 값(산출 언어 few-shot 앵커), SKILL.md 가 인용하는 스크립트/보고서 리터럴,
+   언어 정책 지시문 안의 예시("특이점 없음"). 동반 조치: 에이전트 본문·schemas.md·
+   SKILL.md 에 산출/대화 언어 지시 신설(암묵 보장이던 한국어 산출이 영어화로 끊기는
+   드리프트 채널 차단), `validate_output.py` 에 고신호 산문 필드(claim/rationale,
+   rederivation/failure_scenario/impact) 한글 전무 **경고** 신설(불합격 아님 — 정당한
+   저한글 산문 존재; 테스트 63→67종), 태스크 골격 플레이스홀더 `{{모드 절}}` →
+   `{{MODE_SECTION}}`. "영문 작성 후 최종 번역" 대안은 기각(부록 B — 절감이 지시층
+   전환의 1/3 이하인데 기계 검증 불가한 번역 충실도 저하 채널을 보고서 직전에 신설).
+   검증: 잔여 한글 검사 + 조건·의무 문장 충실도 리뷰 + 기계 계약 보존 대조(ID 접두사·
+   reject_reason 표기·절 번호 등) + `pre-english` 태그 대비 A/B 비교 필드런(재현되는
+   critical/major 소실만 회귀로 판정; M3 픽스처 완성 후 사후 정량 재평가). 계획 원문:
+   `.claude/docs/english-conversion-plan.md`.
