@@ -250,8 +250,9 @@ def counts_by_sev(confirmed):
     return c
 
 
-# 심각도 3줄 정의는 agents/deep-audit-{hunter,verifier}.md 의 "심각도 기준" 절과
-# 동일 문구여야 한다 — 수정 시 세 곳 동기화.
+# 심각도 3줄 정의는 agents/deep-audit-{hunter,verifier}.md 의 "Severity criteria" 절과
+# 동일 문구여야 한다 — 수정 시 세 곳 동기화(에이전트 본문은 영어지만 이 3줄은
+# 한국어 원문 유지 — render_legend 가 보고서에 그대로 렌더한다).
 def render_legend():
     """처음 보는 검토자용 용어 안내 — 접이식(익숙한 독자의 흐름을 막지 않게)."""
     return [
