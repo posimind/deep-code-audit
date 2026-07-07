@@ -3,7 +3,7 @@
 
 판단은 모델에게, 기계적 작업만 스크립트에게. 이 스크립트는 다음만 한다(전부 결정적):
   validate       스키마 검증 + low 심각도 강등 + coverage 대조 + 자기중복 의심 경고
-                 + issues 병합 + state=done
+                 + 산출 언어(고신호 산문 필드 한글 전무) 경고 + issues 병합 + state=done
   route-hints    cross_refs 수집 → 소유 그룹 라우팅 → 커버·기라우팅 대조 →
                  hints/<gid>.json (--residue-check: 미소진 힌트 → hints/residue.json)
   extract-claims defects → claims/<gid>.json (rationale 제거)
@@ -213,6 +213,29 @@ def intra_overlap_pairs(findings):
     return pairs
 
 
+def _has_hangul(s):
+    return any("가" <= ch <= "힣" for ch in s)
+
+
+def hangul_missing_ids(items, fields):
+    """고신호 산문 필드에 한글이 전무한 항목의 id 목록(산출 언어 드리프트 의심).
+
+    한국어 보고서는 이 필드들을 번역 없이 자구 그대로 렌더하므로, 산문이 영어로
+    드리프트하면 보고서에 영어가 그대로 실린다(EXIT=0 조용한 저하). 검사는 고신호
+    산문 필드만 — guard_scan/entry_path/appraisal.evidence 는 정당한 순수 경로·기호
+    목록일 수 있어 제외한다(오경고 소음은 경고 무시를 학습시키는 채널). snippet
+    인용·영문 식별자 위주 문장 같은 정당한 저한글 산문이 존재하므로 불합격이 아니라
+    경고만 — 자기중복 경고와 같은 패턴(기계는 표면화만, 판단은 모델).
+    """
+    out = []
+    for it in items:
+        prose = " ".join(it.get(f) for f in fields
+                         if isinstance(it.get(f), str) and it.get(f).strip())
+        if prose and not _has_hangul(prose):
+            out.append(it["id"])
+    return out
+
+
 # --- verified 검증 ---------------------------------------------------------
 
 def validate_result(r, i):
@@ -367,6 +390,21 @@ def cmd_validate(args):
                 print(f"[validate:WARN] verify g{gid}: confirmed critical/major "
                       f"impact 누락 {no_impact} — 보고서에 '영향' 항목이 빠진다",
                       file=sys.stderr)
+            # 산출 언어 드리프트 경고(불합격 아님 — hangul_missing_ids docstring 참조).
+            drift = hangul_missing_ids(
+                obj["results"], ("rederivation", "failure_scenario", "impact"))
+            if drift:
+                append_issue(run_dir, stage, gid, "script",
+                             f"산문 필드(rederivation/failure_scenario/impact)에 "
+                             f"한글 전무 {len(drift)}건: {drift}",
+                             "validate 산출 언어 검사",
+                             "경고만 기록(불합격 아님) — 보고서는 이 필드를 자구 "
+                             "그대로 한국어 보고서에 렌더",
+                             "영어 드리프트인지 정당한 저한글 산문인지 판단은 "
+                             "오케스트레이터 몫")
+                print(f"[validate:WARN] verify g{gid}: 산문 필드 한글 전무(영어 "
+                      f"드리프트 의심) {drift} — 보고서는 한국어로 렌더된다",
+                      file=sys.stderr)
         else:
             require_cov = (stage == "hunt") and not args.no_coverage
             validate_defects(obj, files_set, require_cov,
@@ -387,6 +425,20 @@ def cmd_validate(args):
                              "검증 단계 판단 대기")
                 print(f"[validate:WARN] {stage} g{gid}: 자기중복 의심 쌍 "
                       f"{pairs_str} — issues.jsonl 기록, 검증 단계에서 판별됨",
+                      file=sys.stderr)
+            # 산출 언어 드리프트 경고(불합격 아님 — hangul_missing_ids docstring 참조).
+            drift = hangul_missing_ids(obj["findings"], ("claim", "rationale"))
+            if drift:
+                append_issue(run_dir, stage, gid, "script",
+                             f"산문 필드(claim/rationale)에 한글 전무 "
+                             f"{len(drift)}건: {drift}",
+                             "validate 산출 언어 검사",
+                             "경고만 기록(불합격 아님) — 보고서는 이 필드를 자구 "
+                             "그대로 한국어 보고서에 렌더",
+                             "영어 드리프트인지 정당한 저한글 산문인지 판단은 "
+                             "오케스트레이터 몫")
+                print(f"[validate:WARN] {stage} g{gid}: 산문 필드 한글 전무(영어 "
+                      f"드리프트 의심) {drift} — 보고서는 한국어로 렌더된다",
                       file=sys.stderr)
             # coverage 대조.
             if require_cov and core_files is not None:
