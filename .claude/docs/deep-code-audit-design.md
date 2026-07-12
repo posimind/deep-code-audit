@@ -1,554 +1,361 @@
-# deep-code-audit — 설계 문서
+# deep-code-audit — Architecture and Operation
 
-> 이 문서는 스킬의 **전체 설계 방향과 목적**을 설명하는 단일 기준 문서다. 선행 문서
-> 3종(워크플로우 정합성 검토 → 개발 계획(Fable 최적화 확정판) → 개선 계획(Rust 파서·
-> 저하 감지))을 통합·승계했으며(§9 이력), 서술은 **현재 구현 상태**를 기준으로 한다.
-> 구현물은 Claude Code **플러그인 구조**다:
-> [.claude-plugin/plugin.json](../../.claude-plugin/plugin.json)(매니페스트),
-> [skills/deep-code-audit/SKILL.md](../../skills/deep-code-audit/SKILL.md)(오케스트레이터),
-> 같은 스킬 디렉터리의 [references/](../../skills/deep-code-audit/references/)(프롬프트
-> 템플릿·스키마)와 [scripts/](../../skills/deep-code-audit/scripts/)(Python 스크립트
-> 4종 + 테스트, 표준 라이브러리만 사용), 플러그인 루트의 [agents/](../../agents/)
-> (전용 서브에이전트 2종).
+> The **single reference document** for anyone new to this skill. It explains the
+> skill's purpose and direction, the structure and operation of the pipeline, and its
+> reliability devices. It consolidates and supersedes all prior design/planning documents
+> (workflow consistency review, development plan, parser-improvement plan, agent-bundling
+> plan, English-conversion plan, accuracy-improvement plan — see §8 history), and
+> describes the design **as currently implemented**.
+>
+> 한국어 버전: [deep-code-audit-design.ko.md](deep-code-audit-design.ko.md)
 
 ---
 
-## 1. 목적과 목표
+## 1. What this skill does
 
-**deep-code-audit**은 워크스페이스(또는 지정 저장소) 전체를 다중 에이전트로 깊이
-감사하여 보안·동시성·결함 처리·로직·리소스 결함을 찾아 **한국어 보고서**로 내는
-Claude Code 스킬이다. 목표는:
+**deep-code-audit** is a Claude Code skill that deeply audits an entire workspace (or a
+specified repository) with multiple agents, hunting for **security, concurrency,
+fault-handling, logic, and resource** defects and producing a **Korean-language report**.
+The implementation is a plugin:
 
-- **최소 미탐 · 최소 오탐 · 최대 정탐** — 적대적 탐지(관대하게 기록) 후
-  적대적 검증(엄격하게 배제)의 2단 구조로 양쪽을 동시에 잡는다.
-- **critical/major 우선** — minor보다 치명 결함의 발견에 비용과 정밀도를 집중한다.
-- **Fable 모델 전제** — 장문 컨텍스트 추론, 가설 기반 탐지, 적대적 자기반박이라는
-  모델 능력에 맞춰 설계했다(서브에이전트 모델은 하드코딩하지 않고 상속).
+- [.claude-plugin/plugin.json](../../.claude-plugin/plugin.json) — manifest (+ self-listing marketplace.json)
+- [skills/deep-code-audit/SKILL.md](../../skills/deep-code-audit/SKILL.md) — orchestrator
+- [references/](../../skills/deep-code-audit/references/) — task-prompt skeletons, schemas, report format
+- [scripts/](../../skills/deep-code-audit/scripts/) — 4 Python scripts + 67 unit tests (standard library only)
+- [agents/](../../agents/) — 2 dedicated subagents (hunter, verifier)
 
-심각도는 3단계다: **critical**(정상 사용에서 악용·데이터 손실·크래시) /
-**major**(특정 조건에서 심각한 오작동·데이터 오염·보안 약화) /
-**minor**(국소적 품질·견고성 결함).
+The core idea fits in one sentence: **a two-stage structure of lenient adversarial
+detection followed by strict adversarial verification minimizes false negatives and false
+positives at the same time.** Hunters record candidates even at low confidence (guarding
+against misses), and a fresh-context verifier then tries to tear each claim apart — only
+what survives makes it into the report (guarding against false alarms).
 
-## 2. 설계 원칙
+Severity has three levels: **critical** (exploitable in normal use, data loss, crash) /
+**major** (serious malfunction, data corruption, or weakened security under specific
+conditions) / **minor** (localized quality or robustness defects). Cost and precision are
+concentrated on critical/major. The design assumes the Fable model's long-context
+reasoning, hypothesis-driven detection, and adversarial self-rebuttal capabilities
+(the subagent model is inherited, never hardcoded).
 
-1. **판단은 모델에게, 결정적 작업만 스크립트에게.** 프로젝트 유형 분류·결함 채점처럼
-   판단이 필요한 일에 키워드 휴리스틱을 쓰면 오분류가 미탐으로 직결된다. 스크립트는
-   라인 수 계산, 그룹 분할, 스키마 검증, 병합, 보고서 렌더링 같은 결정적 작업만
-   담당한다. (이 원칙으로 초기 계획의 스크립트 6종이 4종으로 축소됐다 —
-   `classify_project`는 인모델 감사 브리프로, `score_finding`/`enrich_finding`은
-   verify 프롬프트로 이동.)
-2. **큰 그룹, 적은 에이전트.** 그룹 경계(seam)는 cross-file 결함 미탐의 주요 원인이다.
-   그룹 라인 예산을 크게(기본 10,000라인) 잡아 경계 수 자체를 줄이고, 서브에이전트
-   수·오케스트레이션 비용도 함께 줄인다.
-3. **가설 기반 탐지, 체크리스트 금지.** 취약점 패턴 목록 대조는 목록 밖 결함을 놓친다.
-   신뢰 경계·데이터 흐름·상태 전이·동시성 모델을 추적하며 "여기서 무엇이 깨질 수
-   있는가"를 가설로 세우고 코드로 확인하게 한다.
-4. **탐지는 관대하게, 검증은 적대적으로 — 단 비대칭으로.** critical/major 후보는 낮은
-   확신에도 기록하고(검증 단계가 거른다), minor는 명백한 경우만 기록한다. 검증
-   비용과 정밀도를 critical/major에 집중한다.
-5. **단계 간 인계는 반드시 파일로.** 모든 산출물은 고정 스키마 JSON으로 디스크에
-   기록되어 다음 단계 서브에이전트가 독립적으로 소비한다. 부수 효과로 단계·그룹
-   단위 재개(resume)가 가능하다.
-6. **조용한 실패를 구조적으로 차단한다.** EXIT=0·스키마 유효인데 품질이 무너진 상태
-   (부분 커버리지 산출, 미지원 언어에서의 응집 그룹핑 폴백, 병합 중 기존 발견 소실)가
-   무응답·크래시보다 흔하고 위험하다. 산출물 스키마·스크립트 검증·고지 의무로 각
-   실패 양식을 명시적으로 드러낸다(§6). — 이 원칙은 실전 감사(ssam)에서 Rust 미지원이
-   무경고로 지나간 사건(§9)에서 원칙 수준으로 승격됐다.
+## 2. Design principles — the direction it pursues
 
-## 3. 파이프라인 개요
+1. **Judgment belongs to the model; scripts do only deterministic work.** Using keyword
+   heuristics for judgment calls like project classification or defect scoring turns
+   misclassification directly into missed defects. Scripts handle only line counting,
+   group splitting, schema validation, merging, and report rendering.
+2. **Big groups, few agents.** Group boundaries (seams) are the main cause of missed
+   cross-file defects. A large per-group line budget (default 10,000 lines) reduces the
+   number of boundaries itself.
+3. **Hypothesis-driven detection, no checklists.** Matching against a vulnerability
+   pattern list misses everything outside the list. Hunters trace trust boundaries, data
+   flows, and state transitions, form hypotheses about "what could break here," and
+   confirm them in the code.
+4. **Detect leniently, verify adversarially — but asymmetrically.** Critical/major
+   candidates are recorded even at low confidence; minor ones only when obvious.
+5. **Stage-to-stage handoff must go through files.** Every artifact is written to disk as
+   fixed-schema JSON. A side benefit: per-stage, per-group resume.
+6. **Silent failure must be structurally blocked.** States where EXIT=0 and the schema
+   validates but quality has quietly collapsed (partial coverage, unwarned grouping
+   fallback, findings lost during merge) are more common and more dangerous than crashes.
+   Each failure mode is explicitly detected and surfaced (§5). This principle was
+   promoted to principle rank after a real-world audit in which the absence of a Rust
+   parser passed without warning (§8-3).
 
-오케스트레이터(메인 에이전트)가 4단계(+보강 패스 2.5)를 돌리고, 탐지·검증은 그룹별
-서브에이전트에 백그라운드 병렬(동시 4~6)로 위임한다:
+## 3. Pipeline overview
 
-```
-[0] 프리플라이트   전용 에이전트 정의 존재(결정적)+세션 인식(인모델) 확인 → run 디렉터리
-    (모델+셸)        생성 → 두 타입 카나리 스폰 → 실패 시 기본 중단(호환은 명시 동의)
-                    · preflight/mode.json(dedicated|compat) 기록
-[1] 선별·그룹핑    감사 브리프(인모델: 목적·렌즈 우선순위·고위험 영역)
-    (모델+스크립트)  + select_targets(core/low/exclude) + 분류 검토(인모델)
-                    + group_by_lines(라인수+import 응집, 예산 10K)  ──▶ groups.json
-                                                                       │ 병렬 위임 (동시 4~6)
-[2] 적대적 탐지    그룹별 헌터 서브에이전트(전용 타입 deep-audit-hunter) ▼
-    (모델)          · 전역 읽기 / 그룹 한정 보고
-                    · 비대칭 기록 · coverage 증거                   ──▶ defects/<gid>.json
-                                                                       │
-[2.5] 보강 패스    · 고위험 그룹 critical 전용 2차 헌터(선행)           ▼
-    (모델+스크립트)  · cross_refs 힌트 라우팅 → 표적 sweep
-                    · 잔여 힌트 검사(--residue-check)               ──▶ defects/<gid>.json 갱신
-                                                                        + hints/residue.json
-                                                                       │
-[3] 적대적 검증    검증 서브에이전트(새 컨텍스트)                       ▼
-    (모델+스크립트)  · anti-anchoring 독립 재도출
-                    · 3상태 룰브릭(게이트+임계+시나리오)
-                    · critical/major 풀 검증+감정 보강 / minor 경량 ──▶ verified/<gid>.json
-                                                                       │
-[4] 보고서 생성    build_report(한국어)                                 ▼
-    (스크립트)      · 라인·스닙·실패 시나리오·개선 샘플
-                    · 15건 초과 시 분할                             ──▶ 보고서 .md (1~3개)
-```
-
-모든 산출물은 `<감사대상 루트>/.deep-code-audit/<run-id>/` 아래에 기록한다.
-`run-id`는 실행 시작 시각 `YYYYMMDD-HHMMSS` — 동일 워크스페이스 반복 실행을 구분한다.
+The orchestrator (main agent) runs four stages (plus reinforcement pass 2.5), delegating
+detection and verification to per-group subagents in background parallel (4–6 concurrent):
 
 ```
-.deep-code-audit/<run-id>/
-  preflight/mode.json         # Stage 0 실행 모드 (dedicated|compat) + agent_ids(확정 식별자) — 오케스트레이터 직접 기록(비스키마)
-  preflight/<agent>.json      # Stage 0 카나리 스폰 산출 (동작 확인용)
-  brief.json                  # Stage 1a 감사 브리프
-  targets.json                # Stage 1b 대상 선별 결과
-  groups.json                 # Stage 1d 그룹핑 결과
-  defects/<gid>.json          # Stage 2·2.5 그룹별 탐지 결과 — 다음 단계가 읽는 인계 파일
-  defects/<gid>.second.json   # Stage 2.5 2차 패스 독립 산출 (병합 전)
-  defects/<gid>.sweep.json    # Stage 2.5 sweep 독립 산출 (병합 전)
-  hints/<gid>.json            # Stage 2.5 라우팅된 미커버 힌트 (sweep 입력)
-  claims/<gid>.json           # Stage 3 입력 — rationale 제거 발췌
-  verified/<gid>.json         # Stage 3 그룹별 검증 결과
-  verified/<gid>.batch-N.json # Stage 3 묶음 분할 시 검증자별 산출 (병합 전)
-  state.json                  # 진행 상태 매니페스트 (재개·완료 추적의 단일 근거)
-  issues.jsonl                # 운용 문제 기록 — 스킬 개선 자료
-  감사보고서.md (또는 분할)    # Stage 4 최종 보고서
+[0] Preflight        dedicated agent definitions exist + session recognizes them
+                     → canary spawn → abort by default on failure
+                     (compatibility mode only with explicit consent)
+[1] Select & group   audit brief (in-model) + core/low/exclude classification
+                     + classification review (in-model)
+                     + line-count / import-cohesion grouping      ──▶ groups.json
+[2] Adversarial hunt one hunter per group (repo-wide read / group-only
+                     reporting, asymmetric recording,
+                     per-file coverage evidence)                  ──▶ defects/<gid>.json
+[2.5] Reinforcement  critical-only second-pass hunter on high-risk groups
+                     → cross_refs hint routing → targeted sweep
+                     → residue check                              ──▶ defects updated + residue
+[3] Adversarial      fresh-context verifier (anti-anchoring independent
+    verify           re-derivation, tri-state rubric + gates,
+                     machine-checked consistency)                 ──▶ verified/<gid>.json
+[4] Report           build_report.py — Korean, critical→major→minor,
+                     split into 3 files past 15 findings          ──▶ 감사보고서.md
 ```
 
-**재개**: 완료 기준은 파일 존재가 아니라 `state.json`의 **스키마 검증 통과 기록**이다
-(크래시로 일부만 쓰인 산출물과 완료를 구분하기 위해). 갱신은 `validate_output.py`가
-검증 통과 시점에 수행하고, 각 단계는 시작 전 `state.json`을 확인해 완료된 단계·그룹을
-건너뛴다. run-id 미지정 재호출 시 최신 run에 미완료 항목이 있으면 그 run을 이어간다.
+All artifacts are written under `<target root>/.deep-code-audit/<run-id>/` (run-id =
+`YYYYMMDD-HHMMSS`). **The single source of truth for resume is `state.json`**, and the
+completion criterion is a **recorded schema-validation pass**, not file existence
+(distinguishing completion from an artifact half-written by a crash). Operational
+problems are logged to `issues.jsonl` as symptom/context/action/outcome — the raw
+material for improving the skill (the M4 retrospective). The full file-schema
+specification is in
+[references/schemas.md](../../skills/deep-code-audit/references/schemas.md).
 
-파일 스키마 전체 명세는 [references/schemas.md](../../skills/deep-code-audit/references/schemas.md)에 있다
-(targets/groups/defects/verified/state/issues + 파생 산출물 claims/hints).
+## 4. Stage-by-stage operation
 
-## 4. 단계별 설계
+### Stage 0 — Preflight (dedicated-agent gate)
 
-### Stage 0 — 프리플라이트 (전용 에이전트 번들링)
+The hunter's and verifier's invariant protocols (read/report split, injection defense,
+rubric, anti-anchoring) live in the **body (= system prompt)** of the dedicated agent
+definitions ([agents/](../../agents/)), loaded from disk directly by the harness. What
+this placement buys: (1) compaction during a long run cannot paraphrase or truncate the
+protocol, (2) the ~130-line template does not accumulate in the orchestrator's context on
+every spawn (a spawn prompt = a handful of run variables), (3) agent selection is
+deterministic via explicit `subagent_type`.
 
-헌터·검증자는 **전용 서브에이전트 정의**([agents/deep-audit-hunter.md](../../agents/deep-audit-hunter.md),
-[agents/deep-audit-verifier.md](../../agents/deep-audit-verifier.md))다. 불변 프로토콜
-(읽기/보고 분리·인젝션 방어·룰브릭·anti-anchoring)이 에이전트 **본문(=시스템 프롬프트)**
-에 있고 하네스가 디스크에서 직접 로드하므로, 오케스트레이터 컨텍스트를 경유하지 않는다.
-이 설계가 주는 것: (1) 긴 런의 컴팩션이 프로토콜을 의역·축약할 수 없음(조용한 품질
-저하의 프롬프트판 차단), (2) 스폰마다 ~130줄 템플릿이 오케스트레이터 컨텍스트에 누적되지
-않음(스폰 프롬프트 = 런 변수 몇 개), (3) `subagent_type` 명시 지정으로 에이전트 선택
-결정화. `tools` allowlist(`Read, Grep, Glob, Bash, Write`)는 Edit/MCP를 막지만 Bash가
-있는 한 보안 경계가 아닌 **사고 방지** 수준이다.
+The flip side is that **agent-recognition failure = protocol not delivered**, so
+preflight is a hard gate: confirm the definition files exist → confirm the session
+recognizes them (either plugin-scoped or unscoped identifiers; whichever form the session
+lists is pinned in `mode.json`) → canary-spawn both types. On failure, the default is
+**abort** — thanks to state.json resume, aborting is cheap, while a low-quality full run
+is expensive. **Compatibility mode** (agent body + task skeleton concatenated onto a
+general-purpose subagent) runs only when the user, informed of the degradation, gives
+explicit consent — and it is logged and stated in the final report.
 
-프로토콜을 에이전트 정의로 옮기면 **에이전트 인식 실패 = 프로토콜 미전달**이 되므로,
-Stage 1 진입 전 프리플라이트로 이를 하드 게이트한다:
+### Stage 1 — Audit brief · target selection · grouping
 
-1. **정의 파일 확인(결정적)**: 설치 위치에 두 파일 존재 + frontmatter `name` 일치 확인.
-2. **세션 인식 확인(인모델)**: 사용 가능한 subagent 타입 목록에 두 타입이 보이는지 —
-   무스코프명(레거시 에이전트 심링크) 또는 플러그인 스코프명
-   (`deep-code-audit:deep-audit-hunter` 등) 어느 형태든 인정하되, **세션이 나열한
-   식별자를 확정해**(`mode.json`의 `agent_ids`) 이후 전 스폰에 그대로 쓴다. 파일은
-   있는데 안 보이면 세션 시작 후 설치된 정의라 미등록 — 세션 재시작 안내(실측
-   확인된 동작).
-3. **카나리 스폰(동작 확인)**: run 디렉터리 확정 후 두 타입을 최소 과제로 동시 스폰해
-   스폰 가능성·Write·쓰기 권한을 한 번에 검증. (a)(b)는 run 디렉터리 생성 **전**에 하여
-   실패 시 잔여물이 남지 않게 한다.
+**Brief (in-model).** The orchestrator directly reads the README, manifests, and entry
+points, and records in `brief.json` the project type and purpose, the **lens priority**
+(which of the five defect axes is fatal for this project), and **high-risk areas**
+(including runtime-environment facts — OS, architecture, concurrency model, exposure
+model; grounds that reduce `unknown` verdicts at the verification stage).
 
-**실패 시 기본 중단**: state.json 재개 아키텍처 덕에 중단 비용이 낮고(고치고 재개하면
-완료분 스킵), 저품질 완주가 비싸므로 기본값은 중단이다. **호환 모드**(전용 타입 부재
-환경)는 저하 내용(프로토콜 전달 경로 약점 부활·도구 제한 상실)을 고지받은 사용자가
-**명시 동의**한 경우에만: 에이전트 본문 + task 골격을 이어붙여 범용 서브에이전트로
-전달하고(단일 소스 유지 — 별도 통합본 없음), 태스크 프롬프트에 파일 수정 금지를 명시해
-도구 제한 상실을 보완하며, 동의를 `log-issue`로 기록하고 최종 보고에 명시한다. `mode.json`
-에 실행 모드를 기록해 재개 시 환경 불일치(모드 전환)를 감지·고지한다. **런 중간 인식
-상실**(재개 세션 환경 변화 등)은 인프라 실패로 취급 — 범용 강등 없이 중단·재개 안내
-(산출물 불량용 재시도 사다리와 별개 계열).
+**Selection (`select_targets.py`).** Files are classified three ways — `core` (regular
+source + textual config/infra files, scanned at full priority) / `low` (tests, fixtures —
+scanned but **severity capped at minor**, machine-enforced) / `exclude` (vendor, build
+output, generated code, lock/data/binary files, plus **self-exclusion** of
+`.deep-code-audit/` — without it, from the second run onward previous reports become
+audit targets, a threefold contamination). The orchestrator reviews the classification
+in-model and corrects it via `--include`/`--exclude` overrides — a `low` misclassification
+mechanically demotes a critical to minor, and an `exclude` misclassification means the
+file is never scanned at all.
 
-### Stage 1 — 감사 브리프 · 대상 선별 · 그룹핑
+**Grouping (`group_by_lines.py build`).** Line-count balance + **import-graph connected
+components** for cohesion. Over-budget clusters are split by minimizing the number of cut
+import edges, and cut edges are recorded as `seam_hints` for both groups, injected into
+the hunters' prompts as "trace flows through this interface first" — **if a boundary
+cannot be removed, illuminate it.** Import parsers are best-effort (Python, JS/TS, C/C++,
+Rust, Go, Java/Kotlin); languages without a parser fall back to directory cohesion, but
+the degradation is **always surfaced** via the `cohesion`/`unparsed_source_exts` fields
+and warnings (principle 6). On detected degradation the orchestrator logs it, informs the
+user, and confirms whether to proceed.
 
-**1a. 감사 브리프 (인모델).** 오케스트레이터가 README·매니페스트·진입점을 직접 읽고
-프로젝트 유형·한 줄 목적, **렌즈 우선순위**(security/concurrency/fault/logic/resource
-중 이 프로젝트에서 치명적인 축), **고위험 영역 목록**을 `brief.json`에 기록한다.
-키워드 시그널 스크립트를 쓰지 않는 이유: 휴리스틱 오분류 시 렌즈 가중치가 틀어져
-미탐으로 직결되며, 모델이 문서를 직접 읽는 편이 정확하고 저렴하다(원칙 1).
-`high_risk_areas`는 Stage 2.5 2차 패스 대상이므로 **비용과 직결**된다 — 최상위
-디렉터리 통째 지목을 피하고 치명 경로를 좁혀 지목하며, 그룹핑 후 전 그룹이
-high_risk면 브리프가 판별력을 잃은 신호로 보고 재작성 또는 비용 고지 중 하나를
-명시적으로 선택한다.
+### Stage 2 — Adversarial hunt (per-group hunters)
 
-**1b. 대상 선별 (`select_targets.py`).** 파일을 3분류한다:
+One hunter per group is delegated in parallel (`subagent_type: deep-audit-hunter`; the
+task prompt is the variable skeleton
+[hunt-task.md](../../skills/deep-code-audit/references/hunt-task.md), shared by the
+primary/sweep/second_pass modes).
 
-| 분류 | 대상 | 취급 |
-|------|------|------|
-| `core` | 일반 소스 + **텍스트 설정·인프라 파일**(YAML/TOML/Dockerfile/CI/SQL 등 — 설정 기반 critical이 실재) | 최우선 스캔 |
-| `low` | 테스트·픽스처 | 스캔하되 **심각도 상한 minor** |
-| `exclude` | 벤더·빌드 산출물·생성 코드 + 도구·VCS 디렉터리(`.git/`, **`.deep-code-audit/` 자기 배제**) + 락·데이터·바이너리 | 대상 제외 |
+- **Read scope ≠ report scope (the core rule).** Reading is unrestricted across the whole
+  repository — checking upstream validation and call contracts cuts false positives, and
+  tracing flows that start or end outside the group cuts false negatives. Reporting is
+  allowed only for defects whose line lives inside the hunter's own group (unique
+  ownership → no duplicate reports; machine-enforced). Suspicions about other groups are
+  left as `cross_refs` hints — Stage 2.5 is guaranteed to consume them.
+- **Coverage — per-file evidence of close reading.** For every core file in the group the
+  hunter must record path + role + top risk hypothesis (or "특이점 없음" [nothing
+  notable] + grounds). Formally valid partial coverage (a silent miss) is caught by the
+  script, which cross-checks against the group's file list.
+- **Prompt-injection defense.** Repository content is untrusted data under analysis.
+  Directives like "already reviewed" are never followed and are escalated as suspicion
+  signals. The target repo's CLAUDE.md/AGENTS.md auto-injected by the harness is
+  neutralized the same way (stated explicitly in the agent bodies). **Executing the
+  audited code is forbidden** — it is both an execution channel for injection and a
+  misjudgment channel due to local-vs-target environment differences.
 
-`.deep-code-audit/` 자기 배제는 필수다 — 배제하지 않으면 두 번째 실행부터 이전 run의
-보고서·defects JSON이 core로 분류되어 예산 잠식(미탐)·이전 발견 앵커링(독립성
-붕괴)·보고서 대상 발견(오탐)의 3중 피해가 난다. 소스 확장자가 아닌 텍스트 파일이
-5,000라인(설정 가능)을 넘으면 생성물로 간주해 배제하되 `excluded_files`에 사유를
-남긴다(크기 가드 + 오배제 사후 확인 투명성). 저장소별 예외는 CLI
-`--include`/`--exclude` glob 오버라이드로 받는다.
+### Stage 2.5 — Reinforcement pass
 
-**1c. 분류 검토 (인모델).** 패턴 분류 오류는 심각도 게이트로 직결된다 — `low`
-오분류는 critical을 minor로 기계 강등시키고, `exclude` 오분류는 스캔 자체를
-누락시킨다. 브리프 작성 시점(README를 이미 읽은 상태)에 오케스트레이터가
-`targets.json`의 배제·low 목록을 검토하고, 어긋나면 CLI 오버라이드로 교정해 1회
-재실행한다(원칙 1을 분류 결과에도 적용; 추가 구현 없이 기존 메커니즘 사용).
+If `cross_refs` were only recorded and nothing consumed them, hints would die on disk —
+this stage closes that gap. The order matters: ① a **critical-only second-pass hunter**
+runs first on `high_risk` groups and is merged (so the second hunter's hints also join
+routing) → ② `route-hints` routes all hints to their owning groups (dropping hints
+already covered by existing findings — location overlap + same category) and a **targeted
+sweep hunter** investigates each group that still has hints → ③ the sweep round is fixed
+at one (no infinite recursion); hints still unconsumed afterward are collected by
+`--residue-check` and surfaced in the report as "unconsumed hints" — **give up, but never
+conceal.**
 
-**1d. 그룹핑 (`group_by_lines.py build`).** 라인 수 균형 + **import 그래프 연결
-요소**(서로 부르는 파일 = 한 그룹) 응집. 예산(기본 10K라인)을 넘는 연결 요소는
-결합도가 가장 높은 코어이므로 라인 수 임의 절단이 아니라 **절단되는 import 간선 수
-최소화**(동률 시 디렉터리 경계 우선)로 분할하고, 절단된 간선은 양쪽 그룹의
-`seam_hints`로 기록해 헌터 프롬프트에 "이 인터페이스 경유 데이터 흐름·호출 계약을
-우선 추적하라"로 주입한다 — **경계를 없앨 수 없으면 경계를 조명한다.**
+Second-pass and sweep outputs are **recorded independently in separate files** without
+reading existing results, and merging is done only by script (`validate_output.py
+merge`) — an LLM's read-modify-rewrite can lose existing findings while still passing
+schema validation, a silent-loss channel, so it is forbidden. The merge performs
+deduplication + ID uniqueness + a **superset check on pre-merge finding IDs** (verifying
+every prior finding survived).
 
-- import 추출은 best-effort 정규식 파싱: **Python, JS/TS, C/C++, Rust, Go,
-  Java/Kotlin** 지원. Rust는 크레이트 인덱스(`Cargo.toml` 파싱, `crate::`/`super::`/
-  크로스 크레이트 해석, `mod` 선언), Go는 `go.mod` 모듈 경로 매칭(패키지=디렉터리
-  단위 간선), Java/Kotlin은 `package` 선언 기반 통합 패키지 인덱스(혼용 프로젝트
-  대응)로 해석한다. 미해석 import는 조용히 버린다(일부 유실 허용 — 문제는 전량
-  유실이었다).
-- 파서가 없는 언어는 **디렉터리 응집 폴백**(같은 최상위 디렉터리 = 한 클러스터).
-- **응집 저하 감지·고지(원칙 6)**: 폴백은 EXIT=0으로 조용히 일어나므로 스크립트가
-  `groups.json`에 `cohesion: "import-graph" | "line-balance-only"`와
-  `unparsed_source_exts`(파서 없는 소스 확장자별 파일 수 — 혼합 저장소의 부분 저하도
-  드러남)를 기록하고 간선 0이면 stderr 경고를 낸다. 오케스트레이터는 실행 후 이를
-  점검해 저하 시 issues 기록 + 사용자 고지 + 진행 여부 확인을 한다(SKILL.md Stage 1d
-  체크리스트). 스크립트 경고와 문서 지시를 이중화한 이유: stderr 한 줄은 놓칠 수
-  있고, 진행/중단 판단은 모델의 몫이다.
-- `high_risk` 플래그는 브리프 고위험 영역과의 경로 접두 매칭(결정적 작업)으로 계산.
-  `low` 파일은 core 그룹핑 후 잔여 예산에 후순위 배정.
+### Stage 3 — Adversarial verification
 
-### Stage 2 — 적대적 탐지 (그룹별 헌터)
+For every group with findings, a **fresh-context** verifier is delegated
+(`subagent_type: deep-audit-verifier`; no context shared with the hunters).
 
-그룹당 헌터 1개를 백그라운드 병렬(동시 4~6, 오케스트레이터가 직접 관리)로 위임한다.
-`subagent_type: deep-audit-hunter` 를 명시 지정하며(불변 프로토콜은 에이전트 본문),
-스폰 프롬프트는 [references/hunt-task.md](../../skills/deep-code-audit/references/hunt-task.md)의 변수 골격 —
-primary/sweep/second_pass 세 모드가 공용하며 모드 절만 갈린다. 산출 스키마 경로는 태스크
-프롬프트의 `{{SCHEMA_PATH}}`(절대경로)로 전달한다 — 서브에이전트 CWD는 감사 대상 루트라
-스킬 상대경로가 해석되지 않기 때문이다.
+**Independence protocol (anti-anchoring).** It blocks the confirmation bias of a verifier
+free-riding on the hunter's logic: ① a script produces an excerpt with rationale stripped
+(`claims/<gid>.json` — id, location, claim, severity only), which is embedded in the
+prompt; ② the verifier, seeing only the claims, **independently re-derives** each defect
+from the code and records it in `rederivation`; ③ only **after re-deriving every
+finding** may it open the hunter's file to compare and score. ④ If parroting is observed
+(re-derivation verbally similar to the hunter's rationale), escalate to a 2-turn split.
 
-- **읽기 범위 ≠ 보고 범위 (핵심 규칙).** 읽기는 저장소 전체 자유 — **양방향 목적**이다:
-  상류 검증·호출 계약 확인으로 오탐을 줄이고, 그룹 밖에서 시작·종료하는 흐름(유입점이
-  타 그룹, 싱크가 담당 그룹인 경로 등)을 끝까지 추적해 미탐도 줄인다(단 필요 기반 선택
-  열람). 흐름이 그룹 경계를 넘으면 추적을 멈추지 않는다 — seam_hints 는 정적 import
-  절단 간선만 표시하므로, 파서가 못 보는 결합(동적 디스패치·DI·설정 배선·IPC)은 헌터가
-  흐름 추적에서 스스로 넘어가야 한다. 보고는 결함 라인이 자기 그룹 파일 안에 있는
-  것만(결함 라인의 소유자가 유일 → 중복·월경 보고 없음; `validate_output.py` 가 기계
-  검증).
-- **타 그룹 결함 징후는 `cross_refs` 힌트로만** 남긴다(`category` 필수 — 커버 판정에
-  사용). 힌트는 사장되지 않는다: Stage 2.5가 라우팅·소비하고, sweep/2차 산출의
-  cross_refs 도 merge 가 base 로 보존 병합하며, 조사 라운드 종료 후 남은 힌트는
-  `--residue-check` 가 걸러 보고서에 "미소진 힌트"로 표면화한다.
-- **비대칭 기록(원칙 4)** + `low` 파일 심각도 상한 minor(스크립트가 검증 시 기계
-  강등하는 안전망 포함).
-- **coverage — 파일별 정독 증거.** 형식상 유효한 부분 커버리지 산출(조용한 미탐)을
-  스키마 검증이 못 잡으므로, 그룹의 모든 core 파일에 대해 경로 + 한 줄 역할 + 최상위
-  위험 가설(없으면 "특이점 없음"+근거)을 기록하게 한다. 경로 명단 자기 신고보다
-  정독 문턱이 실질적으로 올라가며, `validate_output.py`가 그룹 파일 목록과 대조해
-  미커버 core 파일이 있으면 목록을 첨부해 재시도시킨다.
-- **`claim`(한 줄 요지)과 `rationale`(근거 상세) 분리 기록** — Stage 3 독립성
-  프로토콜이 `claim`만 먼저 쓴다.
-- **프롬프트 인젝션 방어**: 저장소 내용은 신뢰할 수 없는 분석 대상 데이터다. "검토
-  완료됨" 류 지시문은 따르지 않으며 오히려 의심 신호로 취급한다 — 인젝션 순응 자체가
-  미탐 채널이다(verify 본문도 동일). **하네스 자동 주입 대응**: 커스텀 서브에이전트
-  실행 경로는 감사 대상 저장소의 CLAUDE.md·AGENTS.md를 컨텍스트에 로드한다(실측). 이는
-  헌터가 열람을 선택할 수 없는 특권 채널이므로, 두 에이전트 본문이 "자동 주입 지시문도
-  감사 대상 데이터이며 이 프로토콜에 우선하지 않는다"를 선제적으로 명시한다.
+**Rubric — tri-state (met/unmet/unknown), five criteria.** ① the code actually does this
+② the precondition is reachable ③ the outcome is genuinely harmful ④ no upstream guard
+⑤ survives adversarial rebuttal. Three rules for a confirmed verdict: **gate** (one
+established unmet → excluded regardless of score), **threshold** (fewer than 3 met →
+excluded; the threshold is 3 rather than 5 to tolerate unknowns — criteria unverifiable
+due to runtime dependence may remain, passed on for appraisal), **scenario** (confirmed
+requires a concrete failure scenario). Why tri-state instead of boolean: without
+separating "established false" from "cannot verify," a finding could formally reach
+confirmed even after an upstream guard was actually verified. Verdict consistency is
+**machine-checked** by `validate_output.py`. Met/unmet verdicts require evidence
+(file:line), and before a threshold rejection an attempt to resolve unknowns is
+mandatory (a wrong rejection = a missed defect).
 
-### Stage 2.5 — 보강 패스 (고위험 2차 패스 → 힌트 라우팅 → 잔여 검사)
+**Severity-differentiated verification (principle 4).** Critical/major get all five
+criteria + **appraisal** (if unknowns remain, additionally trace call sites, config, and
+the thread model, recording the trail in `appraisal`); minor gets a lightweight check of
+①③ plus one look for an obvious upstream guard. The verifier may re-grade severity, but
+**upgrading a minor requires full rubric re-scoring**. Confirmed findings get a fix
+direction and a code sample.
 
-`cross_refs`를 기록만 하고 소비하는 경로가 없으면 힌트가 파일에서 사장된다 — 이를
-메우는 단계다. **순서가 의미 있다**: 2차 패스를 먼저 돌려 병합해야 2차 헌터의
-cross_refs(critical 전용 패스의 힌트 — 가장 잃어선 안 되는 축)까지 라우팅이 소비하고,
-2차 발견이 커버 판정에 반영되어 불필요한 sweep이 줄어든다.
+### Stage 4 — Report generation
 
-1. **고위험 critical 전용 2차 패스.** `high_risk: true` 그룹에 한해 "critical만
-   찾아라"로 좁힌 2차 헌터를 투입, `defects/<gid>.second.json`(ID 접두사 `s`)에
-   기록한다. 전 그룹 이중 패스는 비용 2배 + 오탐 후보 증가로 기각 — 고위험 한정이
-   critical 미탐 최소화 대비 비용 효율이 가장 좋은 지점이다.
-2. **힌트 라우팅 → 표적 sweep.** `validate_output.py route-hints`(결정적 작업)가 전체
-   `cross_refs`(1차 + 병합된 2차)를 소유 그룹으로 라우팅하고, 기존 findings가 커버하는
-   힌트·이미 라우팅된 힌트·exclude 대상 힌트를 걸러 `hints/<gid>.json`을 만든다. 커버
-   판정은 **위치 중첩 + 동일 `category`** — 같은 라인에 이종 결함이 공존할 수 있어
-   위치만으로 폐기하면 미탐 채널이 된다. 기라우팅 힌트 제외(file+line+category 기준)는
-   조사 후 기각된 힌트의 재소비를 막고 재개를 멱등하게 만든다. 남은 힌트 그룹마다
-   **sweep 헌터**가 힌트 지점만 집중 조사해 `defects/<gid>.sweep.json`(ID 접두사 `w`)에
-   독립 기록한다. 검증 불능(failed) 그룹으로 라우팅된 힌트도 sweep은 수행한다(저비용으로
-   감사 공백을 부분 보전).
-3. **잔여 힌트 검사.** sweep 헌터가 조사 중 새로 남긴 cross_refs는 merge가 base로 보존
-   병합하지만, 추가 sweep 라운드는 없다(무한 재귀 방지 — 라운드는 1회로 고정).
-   `route-hints --residue-check`가 그런 미소진 힌트를 걸러 `hints/residue.json`에
-   기록하고(잔여 없음이면 빈 목록 — 검사 수행 증거), `build_report.py`가 요약부에
-   "미소진 힌트(추가 확인 권장 지점)"로 표면화한다 — 검증 불능 그룹과 같은 원칙:
-   포기하되 은폐하지 않는다. 이후의 일반 route-hints 실행도 residue 힌트를 "이미
-   처리됨"으로 간주하므로, 재개로 라우팅이 재실행돼도 라운드 1회 불변식이 깨지지
-   않는다.
-
-두 패스 모두 **기존 결과를 열람하지 않고**(탐지 독립성) **별도 파일에 독립
-기록**한다. 기존 `defects/<gid>.json`을 직접 고쳐 쓰게 하지 않는 이유: LLM의
-읽기-수정-재기록은 기존 발견을 소실·변형시켜도 스키마 검증을 통과하는 **무성 소실
-채널**이기 때문이다. 병합은 `validate_output.py merge`가 담당하며 위치 중첩+동일
-category 중복 제거, ID 유일성(접두사 규약), **기존 발견 ID 상위집합 검사**(병합
-결과가 병합 전 발견을 전부 보존하는지), 그리고 **cross_refs 보존 병합**(sweep/2차
-힌트를 base로 옮겨 소비·잔여 검사 대상에 포함)을 수행한다.
-
-### Stage 3 — 적대적 검증
-
-발견이 있는 그룹마다 **새 컨텍스트** 검증자를 위임한다(헌터와 컨텍스트 비공유).
-`subagent_type: deep-audit-verifier` 를 명시 지정하며(불변 anti-anchoring 프로토콜은
-에이전트 본문), 스폰 프롬프트는 [references/verify-task.md](../../skills/deep-code-audit/references/verify-task.md)
-골격 — claims 임베드 + 산출/스키마 경로 변수를 채운다. 발견이 많으면 묶음 분할해 각자
-`verified/<gid>.batch-N.json`에 쓰고 스크립트가 병합한다(단일 작성자 원칙 — sweep·2차
-패스와 같은 패턴).
-
-**독립성 프로토콜 (anti-anchoring).** 검증자가 헌터 논리에 편승하는 확증 편향을
-차단한다:
-
-1. `validate_output.py extract-claims`가 rationale을 제거한 발췌(`claims/<gid>.json`:
-   `id`·`location`·`claim`·`severity`)를 만들고, 오케스트레이터가 이를 프롬프트에
-   임베드한다(rationale이 오케스트레이터 컨텍스트에도 실리지 않음).
-2. 검증자는 claim만 보고 코드에서 결함을 **독립 재도출**해 `rederivation` 필드에
-   기록한다(절차 준수를 산출물로 강제).
-3. **모든 발견의 재도출을 마친 뒤에만** `defects/<gid>.json`을 열어 rationale·
-   `evidence_files`와 대조·채점한다 — 파일이 그룹 전체 발견을 담으므로 발견 단위로
-   번갈아 열람하면 첫 열람에 나머지 rationale이 노출된다.
-4. 편승 징후(`rederivation`이 헌터 rationale과 자구 수준 유사)가 관찰되면 **2턴
-   분리**로 격상한다: claim만으로 스폰 → 재도출 회신 → 같은 에이전트에 rationale 전달.
-
-**룰브릭 — 3상태(met/unmet/unknown) 5기준.**
-
-| # | 기준 | criteria 키 |
-|---|------|-------------|
-| ① | 코드가 실제로 그러함 | `does_this` |
-| ② | 전제조건 도달 가능 | `reachable` |
-| ③ | 결과가 실재 악영향 | `harmful` |
-| ④ | 상류 방어 없음 | `no_guard` |
-| ⑤ | 적대적 반박 생존 | `survives_rebuttal` |
-
-confirmed 판정 3규칙(모두 통과 필수): **게이트**(unmet 1건 확정 → 점수 무관 배제),
-**임계**(met 3개 미만 → 배제; 임계가 5가 아니라 3인 이유는 unknown 허용 — 런타임/설정
-의존으로 확인 불가한 기준이 남아도 통과시키되 감정 보강 대상으로 넘긴다),
-**시나리오**(confirmed에는 구체적 실패 시나리오 필수 — 못 쓰면 confirm 불가).
-3상태로 분리한 이유: boolean 채점은 "거짓으로 확정"과 "확인 불가"를 구분하지 못해,
-④에서 상류 방어를 실제 확인했는데도 ①②③=3점으로 문언상 confirmed가 성립하는 구멍이
-있었다. 이 판정 일관성(게이트·임계·시나리오·score=met 개수·격상 시 full 룰브릭)은
-`validate_output.py`가 **기계 검증**한다 — 위반은 스키마 불합격으로 재시도된다.
-
-**심각도 차등 검증(원칙 4).**
-
-- **critical/major (`rubric: full`)**: 5기준 전체 채점 + **감정(鑑定) 보강** —
-  게이트·임계는 통과했으나 ②·④가 unknown이면 호출부·설정·스레드 모델을 추가 추적해
-  확정을 시도하고 이력을 `appraisal`에 남긴다(unmet 확정 시 오탐 전환).
-- **minor (`rubric: light`)**: ①·③ 일괄 확인(둘 다 met 필수 — minor는 "명백한" 것만
-  기록되므로 확정 불가면 그 자체가 배제 사유) + **명백한 상류 방어 1회 확인**(④의
-  경량 버전 — "상류에서 이미 검증된 취약해 보이는 코드"류 오탐 미끼가 minor로
-  기록됐을 때 그대로 보고서에 실리는 구멍을 막되 감정 보강급 비용은 안 들인다).
-
-검증자는 심각도 재조정 권한을 갖되(`severity_final`), **minor를 major/critical로
-격상하면 풀 룰브릭 재채점 의무** — ①③만 확인된 발견이 critical/major 보고서에 실리는
-것을 막는다(강등은 이미 풀 검증을 거쳤으므로 재채점 불요). confirmed에는
-`fix_sample`(개선 코드 샘플)·`fix_direction`을 작성한다.
-
-### Stage 4 — 보고서 생성 (`build_report.py`)
-
-`verified/*.json`을 `defects/*.json`과 id로 조인해 **한국어** 보고서를 렌더링한다
-(대상 코드베이스의 언어와 무관). 서식의 기준 독자는 **코드베이스에 낯선 검토자**다 —
-파이프라인이 이미 생산하는 독자용 정보를 렌더링에서 버리지 않는 것이 원칙이다(claim·
-entry_path·rebuttal·guard_scan·coverage role 은 한때 미렌더링으로 사장되던 필드였다).
-발견별 요소: **제목 = claim**(위치 아님 — 위치로 폴백), 위치(파일:라인, 심볼)·심각도·
-검증 점수, **파일 역할**(헌터 coverage 조인), **영향**(`impact` — 검증자가 쓰는 비전문
-언어 한 줄, critical/major 권장·누락은 validate 경고), 결함 코드 스닙(확장자 유래 언어
-태그), **도달 경로**(`entry_path`), 메커니즘, **실패 시나리오**(재현 관점), 접이식
-**검증 노트**(rebuttal·guard_scan·appraisal — 오탐 의심 검토자용 근거), **개선 코드
-샘플**과 개선 방향. 요약부에는 접이식 **용어 범례**("이 보고서를 읽는 법")와 **발견
-색인 표**(ID·심각도·분류·요지·위치)를 싣는다. 정렬은 critical→major→minor. **15건
-초과 시 3분할**(`00_요약.md` / `01_critical_major.md` / `02_minor.md` — minor가
-다수여도 격리되어 critical/major 대응을 방해하지 않음), 이하면 `감사보고서.md` 단일
-파일. 요약부에는 감사 범위(배제 목록), 통계, **검증 불능 그룹**(감사 공백 — 수동 확인
-권장)도 명시한다. 서식 명세는
+`build_report.py` joins verified + defects and renders the **Korean** report. The target
+reader is **a reviewer unfamiliar with the codebase** — each finding carries the claim as
+title, location/severity/verification score, file role, a one-line plain-language impact,
+the defective snippet, entry path, mechanism, failure scenario, a collapsible
+verification note (rebuttal, guard scan, appraisal trail), and a fix sample. The summary
+carries a terminology legend, a findings index, the audit scope, and **unverifiable
+groups** (audit gaps — manual review recommended). Past 15 findings the report splits
+into three files (`00_요약.md` / `01_critical_major.md` / `02_minor.md`). The format
+specification is
 [references/report-format.md](../../skills/deep-code-audit/references/report-format.md).
 
-## 5. 오케스트레이션 정책
+### Orchestration policy
 
-- **동시성**: 하네스에 내장 리미터가 없으므로 오케스트레이터가 직접 관리 — 상한
-  (4~6)만큼 백그라운드 스폰 → 완료 통지마다 다음 그룹 스폰.
-- **에이전트 타입**: 전용 타입 `deep-audit-hunter`/`deep-audit-verifier`를 `subagent_type`
-  으로 명시 지정한다(범용 타입 금지 — 불변 프로토콜이 본문에 있어 타입 오선택 = 프로토콜
-  미전달). 플러그인 설치에서는 스코프명(`deep-code-audit:deep-audit-hunter` 등)으로
-  등록되므로 Stage 0a가 세션이 나열하는 식별자 형태를 확정해(`mode.json` `agent_ids`)
-  전 스폰에 그대로 쓴다. 모델은 frontmatter `model` 생략으로 상속(inherit)이 보장된다.
-  `maxTurns`는 v1 미설정(10K라인 그룹 정독 턴 수 데이터 부재 — M4에서 측정 후 설정).
-- **재시도 — 3가지 실패 양식을 구분**:
-  1. 스키마/일관성·미커버 불합격(산출 파일은 있음) → 오류 메시지를 **동일 에이전트에
-     후속 메시지로 회신**해 1회 재시도(컨텍스트가 살아 있어 수정 비용 최저).
-  2. 무응답·크래시(산출 파일 자체가 없음) → 회신 상대가 없으므로 **새 스폰** 1회.
-  3. 재실패 폴백(곧바로 포기하지 않는다 — 포기 대가는 예산 규모의 감사 공백):
-     헌터는 **이분할 재시도**(`group_by_lines.py subgroup`으로 예산 절반의 하위 그룹
-     `4a`/`4b` 생성 후 각각 새 스폰), 검증자는 **묶음 축소**(발견 수 절반) 재시도.
-     그래도 실패하면 `state.json`에 `failed` 기록 → 보고서에 "검증 불능 그룹"으로
-     명시(**포기하되 은폐하지 않는다**).
-- **호출 인터페이스**: 스킬 인자는 자유 텍스트 — 대상 루트·라인 예산·동시 상한·
-  include/exclude·재개를 플래그와 자연어("tests 빼고", "아까 하던 감사 이어서") 양쪽으로
-  해석한다. SKILL.md 프런트매터 `description`은 과소 발동 경향에 대응해 발동 조건을
-  한국어·영어 트리거 문구와 함께 적극적으로 서술한다.
-- **운용 문제 기록 (`issues.jsonl`)**: 재시도·크래시·스크립트 오류·예상 밖 산출·편승
-  징후 등은 발생 즉시 증상/맥락/조치/결과로 기록한다("에러 발생" 수준 요약 금지 —
-  사후 원인 재구성이 존재 이유이며, 스킬 개선(M4 회고)의 근거 자료다). 동시 쓰기
-  충돌을 피해 기록 주체는 오케스트레이터와 `validate_output.py`로 단일화하고,
-  서브에이전트 문제는 자기 산출 JSON의 `issues` 필드로 남기면 검증 시점에 병합된다.
-- **VCS 위생**: `.deep-code-audit/`을 대상 저장소 `.gitignore`에 추가 안내.
+- **Concurrency**: managed directly by the orchestrator — spawn up to the cap (4–6) in
+  the background, spawning the next group on each completion notice.
+- **Retry — three failure modes distinguished**: schema failure (file exists) → reply the
+  error to the same agent, one retry; no response / crash (no file) → one fresh spawn;
+  repeated failure → hunters retry via bisection, verifiers via batch shrinking; if that
+  also fails, record `failed` and state the group as unverifiable in the report.
+- **Invocation interface**: free text — target root, line budget, include/exclude, and
+  resume are interpreted both as flags and as natural language ("tests 빼고", "아까 하던
+  감사 이어서").
+- **Language policy**: instructions to the model (SKILL.md, agent bodies, task skeletons,
+  schema prose) are in **English** (token cost — the instruction layer is billed
+  multiplicatively, spawns × turns; the conversion saved ~36% of instruction-layer
+  tokens); text that reaches humans (prose fields in output JSON, report rendering) stays
+  **Korean**. `validate_output.py` doubles as the drift detector, warning when
+  high-signal prose fields contain no Hangul.
 
-## 6. 신뢰성 장치 요약 (실패 양식 → 방어)
+## 5. Reliability devices (failure mode → defense)
 
-| 실패 양식 | 방어 장치 |
-|-----------|-----------|
-| 형식상 유효한 부분 커버리지(조용한 미탐) | coverage 파일별 증거 + 스크립트 대조·재시도 |
-| 미지원 언어에서 응집 그룹핑 무경고 폴백 | `cohesion`/`unparsed_source_exts` 필드 + stderr 경고 + Stage 1d 점검·고지 의무 |
-| LLM 병합 중 기존 발견 소실(무성 소실) | 패스별 독립 파일 산출 + 스크립트 병합 + 기존 ID 상위집합 검사 |
-| 검증자의 헌터 논리 편승(확증 편향) | claim 발췌 임베드 + 재도출 후 일괄 열람 + `rederivation` 산출 강제 + 2턴 분리 폴백 |
-| 가산 채점의 "확인 불가≠거짓" 구멍 | 3상태 룰브릭 + unmet 게이트 + 시나리오 의무 (스크립트 기계 검증) |
-| 저장소 내 지시문(프롬프트 인젝션) 순응 | hunt/verify 본문의 데이터 취급 원칙 + 의심 신호 격상 |
-| 하네스 자동 주입(대상 CLAUDE.md 특권 채널) | 두 에이전트 본문의 자동 주입 지시문 무력화 명시 |
-| 컴팩션 후 프로토콜 의역·축약(무성 프롬프트 저하) | 불변 프로토콜을 에이전트 본문(디스크 로드)에 배치 — 오케스트레이터 컨텍스트 미경유 |
-| 전용 타입 미인식(프로토콜 미전달) | Stage 0 프리플라이트 하드 게이트(정의 파일·세션 인식·카나리) + 기본 중단 |
-| 자기 산출물 재스캔(2회차 오염) | `.deep-code-audit/` 스캐너 레벨 자기 배제 |
-| 분류 오류의 심각도 게이트 직결 | 인모델 분류 검토(1c) + low 강등 기계 안전망 |
-| 크래시로 반쯤 쓰인 산출물을 완료로 오인 | `state.json` 검증 통과 기준 완료 판정 |
-| 프롬프트 지시 미준수(low 상한 등) | `validate_output.py`의 결정적 안전망(기계 강등·일관성 검증) |
+| Failure mode | Defense |
+|--------------|---------|
+| Formally valid partial coverage (silent miss) | per-file coverage evidence + script cross-check & retry |
+| Unwarned grouping fallback on unsupported languages | `cohesion`/`unparsed_source_exts` + warnings + Stage 1 check-and-inform duty |
+| Findings lost during LLM merge | independent per-pass files + script merge + ID superset check |
+| Verifier free-riding on hunter logic (confirmation bias) | claims-only embed + re-derive-then-open + 2-turn-split fallback |
+| Additive scoring's "unverifiable ≠ false" hole | tri-state rubric + unmet gate + scenario requirement (machine-checked) |
+| Complying with in-repo directives (prompt injection) | untrusted-data principle + suspicion escalation + neutralized auto-injection (target CLAUDE.md) + no execution of audited code |
+| Protocol paraphrased/truncated after compaction | invariant protocol in agent bodies (disk-loaded) |
+| Dedicated type unrecognized (protocol not delivered) | Stage 0 preflight hard gate + abort by default |
+| Re-scanning own artifacts (second-run contamination) | scanner-level self-exclusion of `.deep-code-audit/` |
+| Classification errors feeding the severity gate | in-model classification review + machine safety net for low-cap demotion |
+| Half-written artifact mistaken for complete | completion = validation-pass record in `state.json` |
+| cross_refs hints dying on disk | Stage 2.5 routing & consumption + residue check surfaced in report |
 
-## 7. 구현 구성 요소
+## 6. Implementation layout
 
 ```
 .claude-plugin/
-  plugin.json                # 플러그인 매니페스트 (name: deep-code-audit = 컴포넌트 네임스페이스)
-  marketplace.json           # 자기 등재 마켓플레이스 (source "./" — 단일 플러그인 레포 배포용)
+  plugin.json / marketplace.json   # manifest + self-listing marketplace
 skills/deep-code-audit/
-  SKILL.md                   # 오케스트레이터: Stage 0 프리플라이트 + 4단계 절차, 자연어 인터페이스, 병렬·재시도 정책, 재개
+  SKILL.md                         # full orchestrator procedure
   references/
-    hunt-task.md             # 헌터 스폰 프롬프트 골격 (런 변수 + 모드 절만)
-    verify-task.md           # 검증자 스폰 프롬프트 골격 (claims 임베드 + 2턴 분리 폴백)
-    report-format.md         # 한국어 보고서 서식 명세 (build_report.py 렌더 규칙)
-    schemas.md               # 전 산출물 JSON 스키마 명세 (§0 targets ~ §6 파생 산출물)
-  scripts/                   # 표준 라이브러리만 사용, 단독 실행 CLI
-    select_targets.py        # core/low/exclude 3분류 + 크기 가드 + include/exclude 오버라이드
-    group_by_lines.py        # build(응집 그룹핑·최소 절단 분할·seam_hints·cohesion 감지) / subgroup(이분할)
-    validate_output.py       # validate / init-state / set-state / route-hints / extract-claims
-                             #   / merge(sweep·second·verify) / log-issue — 스키마·일관성 검증,
-                             #   low 강등, coverage 대조, ID 유일성·상위집합 검사, issues 병합,
-                             #   산출 언어(고신호 산문 필드 한글 전무) 경고
-    build_report.py          # verified+defects 조인 → 한국어 보고서 렌더·분할
-    test_scripts.py          # 단위 테스트 67종 (파서·그룹핑·검증·병합·라우팅·보고서·저하 감지)
-agents/                      # 전용 서브에이전트 정의 — 플러그인 루트 고정 위치 (본문=시스템 프롬프트, 불변 프로토콜)
-  deep-audit-hunter.md       # 헌터 (primary/sweep/second_pass 3모드 겸용) — tools allowlist
-  deep-audit-verifier.md     # 검증자 (단일/batch/2턴 분리 공용) — tools allowlist
+    hunt-task.md / verify-task.md  # spawn-prompt skeletons (run variables only)
+    report-format.md               # Korean report format specification
+    schemas.md                     # JSON schema spec for all artifacts
+  scripts/                         # stdlib only, standalone CLIs
+    select_targets.py              # core/low/exclude classification
+    group_by_lines.py              # cohesion grouping & min-cut split / bisection
+    validate_output.py             # validation, state, routing, claims, merge, issue log
+    build_report.py                # Korean report rendering & splitting
+    test_scripts.py                # 67 unit tests
+agents/                            # dedicated subagents (body = invariant protocol)
+  deep-audit-hunter.md             # hunter (primary/sweep/second_pass, 3 modes)
+  deep-audit-verifier.md           # verifier (single/batch/2-turn split)
 ```
 
-검증 명령: `python3 skills/deep-code-audit/scripts/test_scripts.py` (외부 의존성 없음),
-`python3 -m py_compile skills/deep-code-audit/scripts/*.py`,
-`claude plugin validate . --strict`(매니페스트·frontmatter 검사). **설치는 플러그인
-경로가 기본**이다: 이 레포를 `~/.claude/skills/` 아래에 심링크/체크아웃하면
-`.claude-plugin/plugin.json`이 skills-dir 자동 로드를 트리거해(Claude Code v2.1.142+)
-스킬과 에이전트 2종이 플러그인 `deep-code-audit@skills-dir`로 함께 로드된다 — 제자리
-로드라 편집이 즉시 반영되며 별도 동기화가 없고, 컴포넌트는 `deep-code-audit:` 스코프명을
-받는다. 타인 배포는 자기 등재 marketplace.json 덕에
-`/plugin marketplace add posimind/deep-code-audit`로 가능하다. 레거시 경로(에이전트
-심링크 `~/.claude/agents/deep-code-audit → <레포>/agents`, 무스코프명)도 유효하며,
-Stage 0a가 세션이 인식하는 식별자 형태를 확정해 스폰에 쓴다. 어느 경로든 에이전트
-존재·인식은 Stage 0 프리플라이트가 검사하므로 누락 시 감사가 중단된다(조용한 진행
-방지).
+Verification commands: `python3 skills/deep-code-audit/scripts/test_scripts.py` ·
+`python3 -m py_compile skills/deep-code-audit/scripts/*.py` ·
+`claude plugin validate . --strict`. Installation is **plugin-first**: symlink the repo
+root under `~/.claude/skills/` and the skills-dir auto-load (Claude Code v2.1.142+) ships
+the skill and both agents together. Others install via
+`/plugin marketplace add posimind/deep-code-audit`.
 
-## 8. 확정 운영 파라미터와 평가 계획
+## 7. Operating parameters and remaining work
 
-| 항목 | 확정값 | 튜닝 신호 (M4) |
-|------|--------|----------------|
-| 그룹 라인 예산 | 10,000 (CLI 조정 가능) | 그룹 경계 cross-file FN → 상향 / 헌터 품질 저하 → 하향 |
-| 검증 임계 | met 3 | FP 과다 → 4 / critical FN → critical 한정 2 + 감정 보강 의무화 검토 |
-| 2차 패스 범위 | high_risk 그룹만 | 비고위험 그룹 critical FN → 브리프 고위험 판정 기준 확장 |
-| 동시 실행 상한 | 4~6 | 운영 환경 리소스 |
-| 보고서 분할 | 15건 초과 시 3분할 | — |
+| Item | Fixed value | Tuning signal (M4) |
+|------|-------------|--------------------|
+| Group line budget | 10,000 (CLI-adjustable) | cross-file FN → raise / hunter quality drop → lower |
+| Verification threshold | met 3 | too many FP → 4 / critical FN → consider 2 for critical only |
+| Second-pass scope | high_risk groups only | critical FN in non-high-risk → widen high-risk criteria |
+| Concurrency cap | 4–6 | operating-environment resources |
+| Report split | 3 files past 15 findings | — |
 
-**마일스톤 현황**: M1(스크립트+스키마)·M2(SKILL.md+템플릿) 완료, 개선 1차(Rust/Go/JVM
-파서 + 저하 감지)·개선 2차(전용 서브에이전트 번들링 + Stage 0 프리플라이트)·플러그인
-구조 전환(2026-07-13, §9-6) 완료. **남은 것은 M3·M4**:
+**The remaining milestones are M3 and M4**:
 
-- **M3 — 평가 fixture + 채점 스크립트**: 결함 ~20건을 심은 소형 저장소 + 정답지 +
-  위치 중첩 기준 TP/FP/FN 자동 집계 스크립트. fixture 결함 설계는 미탐 취약 지점을
-  겨냥한다 — cross-file 결함(의도적으로 다른 그룹에 배치), 단일 파일 결함, 오탐
-  미끼(상류 방어 있는 코드·테스트 내 의도적 나쁜 패턴 — critical급/minor급 외형을
-  섞어 풀·경량 검증 경로 모두 시험), **프롬프트 인젝션 미끼**(감사 축소 유도 주석 +
-  같은 파일에 결함 동반 배치). fixture 실행은 **라인 예산을 하향(예: 2,000)해 최소
-  3그룹을 강제**한다 — 기본 예산에서 소형 저장소는 그룹 1개가 되어 그룹 경계·힌트
-  라우팅·sweep·2차 패스라는 미탐 방어 기제가 미실행 경로로 남기 때문이다.
-- **M4 — 측정·튜닝**: fixture 반복 실행으로 precision/recall 측정(critical/major
-  recall이 핵심 지표, 동일 fixture 3회 실행 분산 기록) + **결함을 심지 않은 실환경
-  저장소의 오탐률 별도 측정**(fixture 미끼는 설계된 함정의 방어만 재므로 사용자 체감
-  클린 코드 오탐률과 다른 지표다). 매 실행의 `issues.jsonl` 회고로 프롬프트·스크립트
-  결함 수정. `description` 발동 정확도를 should/should-not-trigger 쿼리 ~20개로 측정·
-  최적화.
+- **M3 — eval fixture + scoring script**: a small repository seeded with ~20 defects + an
+  answer key + automatic TP/FP/FN tallying. The fixture targets miss-prone spots —
+  cross-file defects (deliberately placed across groups), false-positive bait (code with
+  upstream guards), prompt-injection bait. The line budget is lowered (e.g. 2,000) to
+  force at least 3 groups — so that the miss defenses (group boundaries, hint routing,
+  sweep) actually execute.
+- **M4 — measurement & tuning**: precision/recall measurement (critical/major recall is
+  the key metric; record variance over 3 runs of the same fixture) + a separate
+  false-positive rate on a clean real-world repository + per-run `issues.jsonl`
+  retrospectives feeding prompt/script fixes + `description` trigger-accuracy
+  measurement.
 
-## 9. 설계 이력 (선행 문서 승계 요약)
+## 8. Design history (superseded documents, summarized)
 
-이 문서는 다음 3개 문서를 통합·대체한다(개정 이력 상세는 아래 요약으로 갈음하며,
-개별 보완 항목의 설계 근거는 본문 §2~§6에 흡수되어 있다).
+This document consolidates and supersedes all of the following. Individual design
+rationale has been absorbed into §2–§5.
 
-1. **워크플로우 정합성 검토** (초기): 요구된 4단계 파이프라인(선별·그룹핑 → 적대적
-   탐지 → 적대적 검증 → 한국어 보고서)과 초기 스킬 구상의 갭 분석. 파일 인계
-   파이프라인, 읽기/보고 범위 분리, 3단계 심각도, 0~5 룰브릭, 보고서 분할의 원형을
-   정의했다.
-2. **개발 계획 (Fable 최적화 확정판, 2026-07-02)**: 구현의 직접 기준이 된 문서.
-   판단의 인모델 이관(스크립트 6종→4종), Stage 2.5 신설(힌트 소비 경로), 3상태
-   룰브릭·게이트, anti-anchoring 프로토콜, coverage 증거, seam_hints, 자기 배제,
-   state.json, issues.jsonl, 재시도·폴백 정책 등 현행 설계 대부분을 확정했다.
-   5차에 걸친 설계 리뷰(하네스 정합성 → 스킬 구현 → 운용 기록 → 목표 관점 감사 2회)로
-   미탐·오탐·운영 결함 30여 건을 사전 보완했다.
-3. **개선 계획 (2026-07-03, 구현 완료)**: 첫 실전 감사(ssam — 100% Rust OCI 컨테이너
-   런타임, run `20260702-233848`)에서 import 파서가 Python/JS·TS/C·C++뿐이라 간선
-   0개로 응집 그룹핑·seam 조명이 **조용히** 무력화된 사건이 계기. 직접 원인(Rust
-   파서 부재)과 구조적 원인(저하가 무경고로 지나감)을 분리해 Rust/Go/Java·Kotlin
-   파서 추가 + `cohesion`/`unparsed_source_exts` 저하 감지·고지(§2 원칙 6)로
-   해소했다. ssam 재검증: 간선 0→142, core 연결 요소 86→31. 문제 분석 원문:
-   `.deep-code-audit/20260702-233848/스킬-문제분석-보고서.md`.
-4. **전용 서브에이전트 번들링 (2026-07-04 계획, 07-06 구현 완료)**: 헌터·검증자 프로토콜이
-   오케스트레이터 컨텍스트를 경유해 전달되던 약점(긴 런 컴팩션 시 의역·축약 위험, 스폰마다
-   ~130줄 템플릿 누적, 에이전트 타입 자연어 선택, 도구 전체 상속)을, 프로토콜을 에이전트
-   본문으로 옮긴 전용 정의(`agents/*.md`) + 변수만 담은 task 골격(`references/*-task.md`)
-   으로 해소했다. 인식 실패 = 프로토콜 미전달이 되므로 Stage 0 프리플라이트(정의 파일·세션
-   인식·카나리 스폰, 기본 중단·명시 동의 호환 모드)를 신설했다. 잠재 결함 2건 동시 교정:
-   산출 스키마 상대경로 의존(서브에이전트 CWD가 대상 루트라 미해석 → `{{SCHEMA_PATH}}`
-   절대경로 전달), 대상 CLAUDE.md 자동 주입 인젝션 표면(본문 방어 문구 명시). 구 골격
-   2파일(`hunt-agent.md`/`verify-agent.md`)은 이중 소스 drift 방지를 위해 삭제. 필드
-   검증(minishop 스크래치 타깃) 1런 완주: 스폰 프롬프트 축소·SCHEMA_PATH 유효·anti-anchoring
-   준수·프리플라이트 중단 게이트 동작 확인. 배치는 B안(레포 `agents/` + 사용자 스코프
-   심링크) — 스킬 호출명·트리거 identity 불변 유지. A안(플러그인화)은 타인 배포 시점으로
-   보류. 계획 원문: `.claude/docs/agent-bundling-plan.md`.
-5. **지시층 영어 전환 (2026-07-07)**: 지시층(SKILL.md 본문·description, 에이전트 본문
-   2종, `hunt/verify-task.md`, `schemas.md` 규칙 산문)을 영어로 전환했다. 근거: Claude
-   토크나이저에서 한글 ~1.2 tok/자 vs 영어 ~0.25 tok/자인데 지시층은 스폰 수 × 턴 수로
-   곱셈 과금된다 — 8그룹·고위험 3그룹 규모 런 기준 지시층 유효 입력 약 940K → 600K
-   토큰(−36%, 런당 ~340K 절감; 전체 런 비용 대비 4~6%, ±30% 오차)으로 추정했다(계획
-   문서 부록 A). **언어 정책 불변식**: 모델에게 주는 지시는 영어, 사람에게 닿는
-   텍스트는 한국어 — 데이터층(산출 JSON 산문 필드: 헌터 `claim`/`rationale`/
-   `coverage[].role`/`.top_risk`/`cross_refs[].hint`, 검증자 `rederivation`/
-   `failure_scenario`/`impact`/`reject_reason`/`rebuttal`/`guard_scan[]`/`appraisal[]`/
-   `fix_direction`, 브리프 `purpose`)과 렌더층(`build_report.py` 리터럴,
-   `report-format.md`, 심각도 기준 3행)은 한국어 유지. `rederivation` 한국어 강제는
-   편승 검사(헌터 `rationale` 과의 자구 유사도)의 전제 조건이다. **영어 파일 안에
-   의도적으로 남긴 한국어**(잔여 한글 검사 허용 목록): 심각도 기준 3행(render_legend
-   와 3곳 자구 동기화), SKILL.md description 의 한국어 트리거 문구, schemas.md 예시
-   JSON 산문 값(산출 언어 few-shot 앵커), SKILL.md 가 인용하는 스크립트/보고서 리터럴,
-   언어 정책 지시문 안의 예시("특이점 없음"). 동반 조치: 에이전트 본문·schemas.md·
-   SKILL.md 에 산출/대화 언어 지시 신설(암묵 보장이던 한국어 산출이 영어화로 끊기는
-   드리프트 채널 차단), `validate_output.py` 에 고신호 산문 필드(claim/rationale,
-   rederivation/failure_scenario/impact) 한글 전무 **경고** 신설(불합격 아님 — 정당한
-   저한글 산문 존재; 테스트 63→67종), 태스크 골격 플레이스홀더 `{{모드 절}}` →
-   `{{MODE_SECTION}}`. "영문 작성 후 최종 번역" 대안은 기각(부록 B — 절감이 지시층
-   전환의 1/3 이하인데 기계 검증 불가한 번역 충실도 저하 채널을 보고서 직전에 신설).
-   검증: 잔여 한글 검사 + 조건·의무 문장 충실도 리뷰 + 기계 계약 보존 대조(ID 접두사·
-   reject_reason 표기·절 번호 등) + `pre-english` 태그 대비 A/B 비교 필드런(재현되는
-   critical/major 소실만 회귀로 판정; M3 픽스처 완성 후 사후 정량 재평가). 계획 원문:
-   `.claude/docs/english-conversion-plan.md`.
-6. **Claude Code 플러그인 구조 전환 (2026-07-13)**: 4항에서 보류했던 A안(플러그인화)을
-   실행했다. `.claude-plugin/plugin.json`(+자기 등재 marketplace.json) 신설, 스킬 본체
-   (SKILL.md·references/·scripts/)를 `skills/deep-code-audit/`로 이동, `agents/`는
-   플러그인 표준 위치인 루트에 유지(매니페스트에는 plugin.json만 — 컴포넌트를
-   `.claude-plugin/` 안에 두면 로드되지 않는 것이 스펙). 설치가 심링크 2개에서 심링크
-   1개(스킬 디렉터리 → 레포 루트)로 줄었다 — skills-dir 플러그인 자동 로드가 스킬과
-   에이전트를 함께 싣는다. 플러그인 로드 시 에이전트가 스코프명
-   (`deep-code-audit:deep-audit-hunter`)으로 등록되므로 SKILL.md Stage 0a에 식별자
-   확정 절차(무스코프/스코프 겸용 인정, `mode.json` `agent_ids` 기록, 전 스폰에서
-   그대로 사용)를 추가했다. 레거시 에이전트 심링크 경로는 전환기 안전망으로 병행
-   지원한다.
+1. **Workflow consistency review** (initial): defined the prototypes of the 4-stage
+   pipeline, file handoff, read/report split, 3-level severity, and report splitting.
+2. **Development plan (Fable-optimized final, 2026-07-02)**: fixed most of the current
+   design — judgment moved in-model (6 scripts → 4), Stage 2.5 added, tri-state rubric
+   with gates, anti-anchoring, coverage evidence, seam_hints, self-exclusion, state.json,
+   retry policy. Five rounds of design review pre-fixed ~30 defects.
+3. **Parser improvement (2026-07-03)**: triggered by the first real-world audit (ssam —
+   100% Rust) where missing import parsers **silently** disabled cohesion grouping. Added
+   Rust/Go/Java-Kotlin parsers + degradation detection & disclosure (promoted to
+   principle 6). Re-run: edges 0 → 142.
+4. **Dedicated-subagent bundling (2026-07-06)**: fixed the weakness of protocols passing
+   through the orchestrator's context (compaction paraphrase risk, template accumulation,
+   type mis-selection) by moving protocols into agent bodies + variable-only task
+   skeletons. Added the Stage 0 preflight. Simultaneously fixed two latent defects:
+   schema relative-path resolution and the auto-injection injection surface.
+5. **Instruction-layer English conversion (2026-07-07)**: established the language-policy
+   invariant — instruction layer in English (billed spawns × turns; instruction-layer
+   effective input ≈ −36%, ~340K tokens saved per run), data and render layers stay
+   Korean. Korean `rederivation` is a precondition for the parroting check. Accompanied
+   by a residual-Hangul allowlist + a no-Hangul warning on high-signal fields (drift
+   detector).
+6. **Accuracy improvement (planned 2026-07-07, Phases 1–3 implemented)**: added
+   runtime-environment facts (OS, architecture, concurrency, exposure model) to the brief
+   to stem `unknown` inflation (track A); operationalized the rubric (track B) — evidence
+   required for met/unmet verdicts, mandatory unknown-resolution attempt before threshold
+   rejection, severity anchor in the verifier body, surfacing the premises of conditional
+   confirms. Banned the exclusive reading of lens priority and codified the no-execution
+   rule.
+7. **Plugin structure conversion (2026-07-13)**: added `.claude-plugin/plugin.json`,
+   moved the skill body to `skills/deep-code-audit/`, kept `agents/` at the plugin-spec
+   root location. Installation shrank to a single symlink. Since agents register under
+   scoped identifiers, Stage 0a gained an identifier-pinning step. The legacy agents
+   symlink remains as a transition safety net.

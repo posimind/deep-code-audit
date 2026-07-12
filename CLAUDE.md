@@ -12,11 +12,17 @@ with its [references/](skills/deep-code-audit/references/) (task-prompt skeleton
 spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 67 unit tests,
 standard library only); [agents/](agents/) (2 dedicated subagent definitions) sits at the
 **plugin root** — the spec's fixed component location (only plugin.json belongs inside
-`.claude-plugin/`). The single design document (Korean) is
-[.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
-consolidates and supersedes the former workflow review, development plan, and improvement
-plan, and describes the design as implemented plus the remaining milestones (M3 eval
-fixture + scoring script, M4 measurement/tuning).
+`.claude-plugin/`). The single design document is
+[.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md)
+(English; Korean counterpart
+[deep-code-audit-design.ko.md](.claude/docs/deep-code-audit-design.ko.md) — keep the two
+in sync when editing) — a
+newcomer-oriented explanation of the skill's purpose, pipeline, and reliability devices;
+it consolidates and supersedes ALL former planning docs (workflow review, development
+plan, parser-improvement, agent-bundling, English-conversion, and accuracy-improvement
+plans — summarized in its §8 history), and describes the design as implemented plus the
+remaining milestones (M3 eval fixture + scoring script, M4 measurement/tuning). It is
+linked from the public README.
 
 The hunter and verifier are **dedicated subagents** (`agents/deep-audit-hunter.md`,
 `agents/deep-audit-verifier.md`): their invariant protocol lives in the agent **body**
@@ -202,8 +208,8 @@ Key design decisions worth preserving when modifying this skill:
 - **Language policy (since 2026-07-07)**: the *instruction layer* is English — SKILL.md
   body/description, both agent bodies/descriptions, `hunt/verify-task.md`, `schemas.md`
   rule prose (token cost: instruction files are billed multiplicatively, spawns × turns;
-  the conversion saves ~36% of instruction-layer tokens per run — see
-  `.claude/docs/english-conversion-plan.md`). The *data layer* (prose value fields in
+  the conversion saves ~36% of instruction-layer tokens per run — see the design doc's
+  §8-5 history entry). The *data layer* (prose value fields in
   output JSON: hunter `claim`/`rationale`/`coverage[].role`/`.top_risk`/`cross_refs[].hint`;
   verifier `rederivation`/`failure_scenario`/`impact`/`reject_reason`/`rebuttal`/
   `guard_scan[]`/`appraisal[]`/`fix_direction`; brief `purpose`) and the *render layer*
