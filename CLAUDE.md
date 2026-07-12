@@ -4,10 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository state
 
-The `deep-code-audit` skill is **implemented** at the repo root: [SKILL.md](SKILL.md)
-(orchestrator), [agents/](agents/) (2 dedicated subagent definitions), [references/](references/)
-(task-prompt skeletons + schema spec), and [scripts/](scripts/) (4 Python scripts + 67 unit
-tests, standard library only). The single design document (Korean) is
+This repo is a **Claude Code plugin** ([.claude-plugin/plugin.json](.claude-plugin/plugin.json),
+plus a self-listing [marketplace.json](.claude-plugin/marketplace.json) making the GitHub
+repo directly installable). The `deep-code-audit` skill lives at
+[skills/deep-code-audit/SKILL.md](skills/deep-code-audit/SKILL.md) (orchestrator) together
+with its [references/](skills/deep-code-audit/references/) (task-prompt skeletons + schema
+spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 67 unit tests,
+standard library only); [agents/](agents/) (2 dedicated subagent definitions) sits at the
+**plugin root** — the spec's fixed component location (only plugin.json belongs inside
+`.claude-plugin/`). The single design document (Korean) is
 [.claude/docs/deep-code-audit-design.md](.claude/docs/deep-code-audit-design.md) — it
 consolidates and supersedes the former workflow review, development plan, and improvement
 plan, and describes the design as implemented plus the remaining milestones (M3 eval
@@ -21,23 +26,32 @@ task prompt (run variables only) built from `references/hunt-task.md` / `verify-
 This is the single source of truth — there is no combined body+task file; compatibility
 mode concatenates the two on the fly only under explicit user consent (see Stage 0).
 
-`~/.claude/skills/deep-code-audit` is a **symlink to this repo**, so edits here are live —
-no sync step. The dedicated agents need a **second symlink**,
+Install is **plugin-first**: `~/.claude/skills/deep-code-audit` is a **symlink to this
+repo root**, and since the repo carries `.claude-plugin/plugin.json`, the skills-dir scan
+loads it as plugin `deep-code-audit@skills-dir` (Claude Code v2.1.142+) — discovered in
+place, so edits here are live with no sync step — shipping the skill and both agents
+together under plugin-scoped identifiers (`deep-code-audit:deep-audit-hunter` /
+`deep-code-audit:deep-audit-verifier`). The legacy **agents symlink**
 `~/.claude/agents/deep-code-audit → <repo>/agents` (user-scope agents dir is recursively
-scanned; identifier = frontmatter `name`, not path). Agents installed after a session
+scanned; identifier = frontmatter `name`, unscoped) still works and currently coexists as
+a transition safety net — SKILL.md Stage 0a resolves whichever identifier form the session
+lists (preferring unscoped when both appear); drop the agents symlink once the plugin
+route is confirmed in a fresh session. Others install via
+`/plugin marketplace add posimind/deep-code-audit`. Agents installed after a session
 starts are not recognized until restart — Stage 0 preflight checks this. (A field-test run
 against the ssam repo, 2026-07-02, produced the problem-analysis report that motivated the
 Rust-parser improvement round; its run directory is no longer kept in this repo.)
 
 ### Commands
 
-- **Unit tests** (67, no external deps): `python3 scripts/test_scripts.py`
-- **Compile check**: `python3 -m py_compile scripts/*.py`
+- **Unit tests** (67, no external deps): `python3 skills/deep-code-audit/scripts/test_scripts.py`
+- **Compile check**: `python3 -m py_compile skills/deep-code-audit/scripts/*.py`
+- **Plugin manifest check**: `claude plugin validate . --strict`
 
 There is no build step or linter configured. The scripts do only deterministic work; all
 judgment (project classification, defect scoring) lives in the prompts — the hunter/verifier
 detection & rubric protocols in the agent bodies under `agents/`, and the orchestrator's
-in-model steps plus task/report skeletons under `references/`.
+in-model steps plus task/report skeletons under the skill's `references/`.
 
 ## Purpose
 

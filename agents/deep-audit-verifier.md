@@ -161,7 +161,7 @@ each independently.
 
 ### Severity criteria (anchor for severity_final)
 
-<!-- These 3 lines must be verbatim-identical in three places: here, the "Severity criteria" section of deep-audit-hunter.md, and render_legend in scripts/build_report.py — sync all three on any edit. They deliberately stay in Korean: render_legend renders this exact wording into the Korean report, and the verbatim-sync invariant only holds if all three sites keep the Korean original. -->
+<!-- These 3 lines must be verbatim-identical in three places: here, the "Severity criteria" section of deep-audit-hunter.md, and render_legend in skills/deep-code-audit/scripts/build_report.py — sync all three on any edit. They deliberately stay in Korean: render_legend renders this exact wording into the Korean report, and the verbatim-sync invariant only holds if all three sites keep the Korean original. -->
 - **critical**: 정상 사용 흐름에서 악용·데이터 손실·크래시로 이어짐
 - **major**: 특정 조건에서 심각한 오작동·데이터 오염·보안 약화
 - **minor**: 국소적 품질·견고성 결함, 실피해가 제한적

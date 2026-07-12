@@ -1,0 +1,12 @@
+{
+  "name": "deep-code-audit",
+  "displayName": "Deep Code Audit",
+  "version": "0.1.0",
+  "description": "Multi-agent adversarial code audit: parallel hunters and fresh-context verifiers sweep a whole repository for security, concurrency, fault-handling, logic, and resource defects, then render a Korean-language report.",
+  "author": {
+    "name": "Youhyun Jung",
+    "email": "yh.jung0525@gmail.com"
+  },
+  "repository": "https://github.com/posimind/deep-code-audit",
+  "keywords": ["code-audit", "security", "code-review", "multi-agent", "defect-hunting"]
+}

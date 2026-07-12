@@ -25,7 +25,8 @@ stages/groups are skipped on resume.
 **Design philosophy (why it works this way)**: judgment to the model, deterministic
 work only to scripts. Detect generously, verify adversarially (with cost concentrated
 on critical/major). Large groups and few agents reduce group-boundary misses. Detailed
-rationale: `.claude/docs/deep-code-audit-design.md`.
+rationale: `.claude/docs/deep-code-audit-design.md` at the plugin root (two levels
+above this SKILL.md).
 
 **Conversation language**: everything user-facing — questions, interim notices, and
 the final summary — is written in **Korean**. (The instruction layer is English; do
@@ -40,7 +41,8 @@ not let that drift your user-facing language. The report artifacts are Korean to
   - `validate_output.py` schema validation, state updates, hint routing, claim
     extraction, merge, issues
   - `build_report.py` Korean report rendering/splitting
-- `agents/` — **2 dedicated subagent definitions**. The invariant protocol
+- `agents/` — **2 dedicated subagent definitions**, at the **plugin root**
+  (`$SKILL/../../agents/`, not inside this skill directory). The invariant protocol
   (read/report split, injection defense, rubric, anti-anchoring, …) lives in the agent
   **body (= system prompt)**, which the harness loads directly from disk — it does not
   pass through the orchestrator's context, so compaction paraphrase/truncation is
@@ -48,8 +50,13 @@ not let that drift your user-facing language. The report artifacts are Korean to
   - `deep-audit-hunter.md` — Stage 2 primary / Stage 2.5 sweep·second_pass, 3 modes
   - `deep-audit-verifier.md` — Stage 3 adversarial verification (single/batch/2-turn
     split)
-  - **Install**: besides the skill symlink, a separate agents symlink is required:
-    `ln -s <this skill's path>/agents ~/.claude/agents/deep-code-audit`
+  - **Install**: when this repo is loaded as a **plugin** (marketplace install, or a
+    checkout placed/symlinked under `~/.claude/skills/` — its
+    `.claude-plugin/plugin.json` triggers skills-dir autoload), the agents ship with
+    it under **plugin-scoped names** (`deep-code-audit:deep-audit-hunter` /
+    `deep-code-audit:deep-audit-verifier`). A legacy non-plugin install instead needs
+    an agents symlink exposing the **plain names**:
+    `ln -s <plugin root>/agents ~/.claude/agents/deep-code-audit`
 - `references/` — **task-prompt skeletons (run variables only)** to fill and pass to
   subagents, plus the schema.
   - `hunt-task.md`, `verify-task.md`, `report-format.md`, `schemas.md`
@@ -89,13 +96,21 @@ silent quality degradation (the failure mode this skill treats as more dangerous
 crashes). Check before entering Stage 1, for new runs and resumes alike:
 
 1. **Definition files check (deterministic)**: confirm with ls/grep that both files
-   exist at the agent install location (the `~/.claude/agents/deep-code-audit/`
-   symlink or an equivalent path) and that their frontmatter `name` matches
-   `deep-audit-hunter` / `deep-audit-verifier`.
+   exist at the agent install location — the plugin's `agents/` directory
+   (`$SKILL/../../agents/`) for a plugin install, or the
+   `~/.claude/agents/deep-code-audit/` symlink for a legacy install — and that their
+   frontmatter `name` matches `deep-audit-hunter` / `deep-audit-verifier`.
 2. **Session recognition check (in-model)**: confirm both types appear in the list of
-   subagent types available in the current session. **If the files exist but the types
-   are not visible**, the definitions were installed after the session started and are
-   unregistered (empirically confirmed behavior) — advise a session restart.
+   subagent types available in the current session, under either their **plain names**
+   (`deep-audit-hunter` / `deep-audit-verifier` — legacy agents-symlink install) or
+   their **plugin-scoped names** (`deep-code-audit:deep-audit-hunter` /
+   `deep-code-audit:deep-audit-verifier` — plugin install). **Resolve the exact
+   identifier form the session lists and use it verbatim as `subagent_type` for every
+   spawn in Stages 2–3** (recorded as `agent_ids` in mode.json at 0c). If both forms
+   are visible (both install paths present), prefer the plain names. **If the files
+   exist but neither form is visible**, the definitions were installed after the
+   session started and are unregistered (empirically confirmed behavior) — advise a
+   session restart.
 
 On failure here, **abort leaving no residue** (failure policy below). On pass, go
 to 0b.
@@ -141,9 +156,13 @@ permission at once (cost: two mini spawns — negligible against the whole run).
 skipped if the remaining incomplete stages need no subagents (a resume with only the
 report left).
 
-On pass (or compat consent below), record `{"mode": "dedicated" | "compat"}` into
-`$RUN/preflight/mode.json` (a non-schema info file the orchestrator writes directly —
-the scripts do not touch it).
+On pass (or compat consent below), record
+`{"mode": "dedicated" | "compat", "agent_ids": {"hunter": ..., "verifier": ...}}`
+(the identifiers resolved at 0a) into `$RUN/preflight/mode.json` (a non-schema info
+file the orchestrator writes directly — the scripts do not touch it). On resume,
+re-resolve `agent_ids` for the current session — the identifier form may legitimately
+differ across sessions (install path changed); only the `mode` value is held to the
+consistency rule of 0b.
 
 ### Preflight failure policy
 
@@ -272,9 +291,10 @@ For every group whose `state.hunt` is `pending`/`retrying`, delegate one hunter
 subagent in **background parallel**. Manage the **concurrency cap of 4–6** yourself:
 spawn up to the cap → on each completion notice, spawn the next group.
 
-- **Agent type**: `subagent_type: deep-audit-hunter`, **explicitly** (general-purpose
-  types forbidden — the invariant protocol lives in the agent body, so picking the
-  wrong type = protocol not delivered). The model is guaranteed **inherited** because
+- **Agent type**: the hunter identifier resolved at preflight — `deep-audit-hunter`
+  or `deep-code-audit:deep-audit-hunter` (`agent_ids.hunter` in mode.json) —
+  **explicitly** (general-purpose types forbidden — the invariant protocol lives in
+  the agent body, so picking the wrong type = protocol not delivered). The model is guaranteed **inherited** because
   the agent frontmatter omits `model` — do not specify one at spawn either.
 - **Prompt**: fill the `references/hunt-task.md` skeleton with `{{TARGET_ROOT}}`,
   `{{RUN_DIR}}`, `{{GROUP_ID}}`, `{{SCHEMA_PATH}}` (= the **absolute path** of
@@ -314,7 +334,8 @@ and second-pass findings feed the coverage decision, reducing unnecessary sweeps
 For each `high_risk: true` group (= groups that have a key in `state.second`),
 delegate a **critical-only second hunter**:
 
-- Spawn: `subagent_type: deep-audit-hunter` + the **second_pass mode block** of the
+- Spawn: the hunter identifier from preflight (`agent_ids.hunter`) + the
+  **second_pass mode block** of the
   `hunt-task.md` skeleton. "critical only", no reading the primary results, output
   `$RUN/defects/<gid>.second.json` (ID prefix `s`, severity all critical).
 - Validate & merge:
@@ -339,7 +360,8 @@ routed (idempotent on resume), and hints pointing at excluded targets; produces
 `$RUN/hints/<gid>.json`. For each group that got a hint file, delegate a **sweep
 hunter**:
 
-- Spawn: `subagent_type: deep-audit-hunter` + the **sweep mode block** of the
+- Spawn: the hunter identifier from preflight (`agent_ids.hunter`) + the
+  **sweep mode block** of the
   `hunt-task.md` skeleton. Focused investigation of the hint loci only, no reading of
   existing results, output `$RUN/defects/<gid>.sweep.json` (ID prefix `w`).
 - Validate & merge:
@@ -392,7 +414,9 @@ orchestrator's context either).
 For each group with findings, delegate a **fresh-context** verifier (no context
 shared with the hunter):
 
-- Spawn: `subagent_type: deep-audit-verifier`, **explicitly**. The prompt is the
+- Spawn: the verifier identifier resolved at preflight — `deep-audit-verifier` or
+  `deep-code-audit:deep-audit-verifier` (`agent_ids.verifier`) — **explicitly**. The
+  prompt is the
   `references/verify-task.md` skeleton with `{{CLAIMS_EMBED}}` = the `claims` array
   of `claims/<gid>.json` **embedded as-is**, and `{{GROUP_ID}}`, `{{RUN_DIR}}`,
   `{{OUTPUT_PATH}}`, `{{SCHEMA_PATH}}` (absolute path) filled. **Do not embed
@@ -477,8 +501,8 @@ Same for hunters and verifiers.
 If a spawn fails mid-run with an `Agent type '...' not found`-class error (an
 environment change in a resumed session, …), **do not demote** the group to a
 general-purpose type — a mixed-mode run breaks cross-group result comparability and
-hides the problem. `log-issue`, then **abort**, and guide environment repair (restore
-the agents symlink, restart the session) → resume. The retry ladder above is for
+hides the problem. `log-issue`, then **abort**, and guide environment repair
+(re-enable the plugin or restore the agents symlink, restart the session) → resume. The retry ladder above is for
 defective outputs and does not apply to this failure class.
 
 ### Operational problem logging (required)
