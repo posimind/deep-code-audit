@@ -266,9 +266,13 @@ Field conventions:
 - `rubric`: `full` (critical/major, 5 criteria) | `light` (minor, ①③ + obvious-guard
   check).
 - `score`: **integer met count** — the number of criteria valued `met` across all
-  recorded `criteria` (machine-checked by rule 5). full 0–5, light 0–3 (the pass
-  condition is ①③, but if `no_guard` was recorded as met the score includes it).
-  Notation like "5/5" is produced only at report rendering.
+  recorded `criteria`. full 0–5, light 0–3 (the pass condition is ①③, but if
+  `no_guard` was recorded as met the score includes it). Notation like "5/5" is
+  produced only at report rendering. **It is a deterministic function of `criteria`
+  and is used in no gate/threshold decision** (those count `met` directly), so a wrong
+  value is not a retry cause — `validate_output.py` overwrites it with the met count
+  and warns (rule 5). Still record your honest count; the auto-correction is a safety
+  net, not a license to guess.
 - `criteria`: the tri-state verdict map.
   - full rubric: record all five — `does_this` (①), `reachable` (②), `harmful` (③),
     `no_guard` (④), `survives_rebuttal` (⑤).
@@ -297,7 +301,8 @@ Field conventions:
      (`criteria` contains unmet), `reject_reason` must **name which criterion is
      unmet** (contain at least one of the unmet criterion's key name or its ①–⑤ mark —
      prevents wrong-unmet = false negatives).
-  5. `score` matches the met count in `criteria`.
+  5. `score` is **auto-corrected** to the met count in `criteria` (overwrite + warn,
+     never a retry — score drives no decision).
   6. `rubric: "full"` and `reachable == "met"` requires a non-empty `entry_path`.
   7. `rubric: "full"` and `no_guard == "met"` requires a non-empty `guard_scan`
      (array of strings).
@@ -307,7 +312,14 @@ Field conventions:
      `verdict: "false_positive"` · no unmet in `criteria` (= threshold rejection)
      requires a non-empty `appraisal` (the history of unknown-resolution attempts
      before rejecting — prevents false negatives via fleeing into unknown).
-  Consistency violations are treated as schema failures and retried.
+  10. **Completeness gate**: the group's `results` must judge **every finding ID** in
+     `defects/<gid>.json` (a verdict for each — confirmed or false_positive). A verified
+     output missing an ID (a partial write) is retried, because `build_report` renders
+     only what `results` contains, so an unjudged finding would silently vanish from the
+     report (neither confirmed nor counted as a false positive). Checked on the merged
+     `verified/<gid>.json`, not individual `batch-N` files.
+  Consistency violations are treated as schema failures and retried (rule 5 excepted —
+  score is auto-corrected, not retried).
 - `severity_final`: the verifier's re-grade. **Upgrading a minor to major/critical
   requires `rubric: "full"`** (prevents findings that only went through light
   verification from being reported upward).

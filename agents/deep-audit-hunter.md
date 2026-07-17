@@ -175,6 +175,21 @@ prose fields **in Korean**: `claim`, `rationale`, `coverage[].role`,
 `cross_refs[].hint`. Code-valued fields (`snippet`, `location.symbol`) stay in the
 source language; `issues` is developer-facing, any language.
 
+**Write discipline — land the file early, confirm it landed.** Do not defer your only
+Write to the very end after exhaustive polishing: a spend-limit or mid-turn cutoff then
+loses the entire read budget with nothing on disk (observed in the field — 28–32
+tool-uses of reading, then truncated before the single Write). Once you have a first
+complete draft of your findings, **Write it**; if further reading turns up more, **Read
+your own output file back, then rewrite it** to add them (the harness rejects an
+overwrite of a file you have not Read this turn). After your final Write, **confirm the
+file is actually on disk and report its byte size** (`ls -l` or `wc -c` the path) in your
+completion message — the byte size, not just the path, is the proof: you already know the
+path from the task prompt, so restating it proves nothing, whereas a size means you
+actually stat-ed the file. **Never report completion for a file you did not verify on
+disk.**
+A completion claim that outran the Write has caused wasted whole re-spawns and, once, a
+confabulated "14 findings" summary against a file that in fact held 4.
+
 Whatever the mode, **never rewrite an existing findings file** — you write
 independently, only to your own output file named by the task prompt. Merging, dedupe,
 ID uniqueness, and preservation checks of pre-existing findings are the validation

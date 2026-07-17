@@ -101,6 +101,41 @@ and re-verify.
 be wrong" — is it already validated upstream? Is the path actually reached? Is the
 outcome real damage, or a theoretical concern?
 
+### Guard-trust rejections must survive the attacker's counter-move (false-negative defense)
+
+Killing a real defect costs as much as passing a false one: a wrong `unmet` on ④, or a
+guard-based rebuttal, silently drops a genuine vulnerability, and unlike a false
+positive nothing downstream catches it. So whenever your reason to reject rests on
+**"an upstream guard / validation / signature already blocks this"**, you must first
+prove the guard holds against the standard attacker moves before trusting it. For a
+**critical/major security finding especially**, before marking ④ `no_guard: "unmet"`
+or writing a guard-based `rebuttal`, check whether the guarded value is
+**re-interpreted downstream in a context that reintroduces attacker control**:
+
+- **Token / argument splitting**: a validated string later concatenated into a
+  space- or delimiter-separated command, table, or option line — e.g. an `algorithm`
+  field spliced into a kernel dm-verity table, where a value like `"crc32c <hex>"`
+  splits into two tokens the length/charset check never anticipated.
+- **Encoding / normalization**: the value passes validation in one form but is
+  percent-, unicode-, or path-normalized before the sink.
+- **Path traversal / re-rooting**: a name checked for `/` or `..` but later `join`ed
+  under an attacker-influenced root, or re-parsed by a layer with different rules.
+- **TOCTOU / re-read**: the bytes validated are not the bytes used (verified once,
+  re-read at the sink from a mutable source).
+- **Provenance ≠ integrity**: "it comes from a signed/trusted payload" only holds if
+  the **signature covers that exact field** and the field is not re-derived from an
+  unsigned source. A signed `root_hash` does not protect an unsigned `algorithm`/`salt`
+  that selects how `root_hash` is interpreted.
+
+If any such vector reaches the sink, the guard does **not** hold: ④ is `met` (no
+effective guard) or the finding survives ⑤ — do not reject on that ground. Record the
+vector you tried (and why it does or does not apply) in `rebuttal` / `guard_scan`.
+**"The value is validated/signed upstream", with no downstream-reinterpretation check,
+is an incomplete rebuttal — never reject a critical/major on it.** (This is the exact
+class that produced a false-negative split verdict in the field: one verifier trusted a
+signed `root_hash` and rejected, while another saw the `algorithm` token-splitting
+vector and confirmed the same defect as critical.)
+
 ### The three rules for confirmed (all must pass)
 
 1. **Gate**: if any of ①–⑤ is **established as unmet**, the verdict is
@@ -209,6 +244,21 @@ anti-parroting check compares its wording against the hunter's Korean `rationale
 a language mismatch would blind that check. `fix_sample` is code (source language),
 but write the comments inside it in Korean. `entry_path` and path/symbol tokens stay
 as-is; `issues` is developer-facing, any language.
+
+**Write discipline — land the file early, confirm it landed.** Do not defer your only
+Write to the very end after scoring every finding: a spend-limit or mid-turn cutoff then
+loses the entire re-derivation budget with nothing on disk (observed in the field —
+verifiers truncated at 28–32 tool-uses before their single Write). Once you have a first
+complete draft of `results`, **Write it**; if you keep refining, **Read your own output
+file back, then rewrite it** (the harness rejects an overwrite of a file you have not
+Read this turn). After your final Write, **confirm the file is actually on disk and
+report its byte size** (`ls -l` or `wc -c` the path) in your completion message — the
+byte size, not just the path, is the proof: you already know the path from the task
+prompt, so restating it proves nothing, whereas a size means you actually stat-ed the
+file. **Never report completion for a file you did not verify on disk** (a stale "done"
+against a missing file has caused wasted whole re-spawns). Partial `results` will fail the
+completeness gate and be resumed — that is the intended safety net, not a reason to
+withhold the early Write.
 
 Never rewrite an existing output file — you write only to your own output file named
 by the task prompt (merging after a batch split is the validation script's job).

@@ -233,7 +233,16 @@ Why no keyword script here: heuristic misclassification skews the lens weights
 straight into false negatives, and reading the documents directly is both more
 accurate and cheaper.
 
-### 1b. Target selection
+**User-specified review targets take priority over your own read.** If the user
+explicitly asked to make sure something is checked, fold it into the brief **above your
+own judgment**, routed by kind: a defect class ("check for SQL injection", "focus on
+concurrency") → raise it in `lens_priority`; a path or component ("scrutinize the
+payment module", "the mount/privilege-escalation paths") → add it to `high_risk_areas`
+(which then gets the Stage 2.5 second-pass re-detection — the strongest "must be looked
+at" guarantee available); an environment condition ("it also runs on Windows") →
+`environment`. These enter as **hypothesis lenses / premises, never as a terminal
+checklist** — the hunter still starts from them and keeps looking beyond them, so this
+honors principle 3 (hypothesis-driven, no checklists) rather than excepting it.
 
 ```
 python3 $SKILL/scripts/select_targets.py <target root> --out $RUN/targets.json \
@@ -440,6 +449,38 @@ If parroting signs appear (`rederivation` word-level similar to the hunter's
 `deep-audit-verifier` type; spawn from the skeleton with the defects path removed →
 receive the re-derivation → deliver the path in a follow-up message).
 
+### 3c. Cross-group verdict conflict → fresh arbitration (never resolve inline)
+
+While reviewing verify outputs before the report, if the **same underlying defect was
+judged oppositely by two groups' verifiers** — confirmed in one group, `false_positive`
+in another (visible when two findings share a root cause, often linked by a `cross_refs`
+hint, yet land on opposite verdicts) — do **not** settle it by reading the code
+yourself. A single-perspective inline resolution reached the right answer once in the
+field but carries no independence guarantee and leaves no reproducible verdict.
+
+1. Spawn **one fresh `deep-audit-verifier`** (the preflight-resolved type) whose claim
+   list embeds **both** findings together — so it re-derives with the whole picture the
+   two per-group verifiers each half-saw. Output: `verified/arb-<gidA>-<gidB>.json`.
+   Because the verifier body now carries the false-negative defense (a guard-trust
+   rejection must survive the attacker's counter-move), this is exactly the axis that
+   split the two verifiers in the first place.
+2. **Apply the arbitration verdict deterministically** — never hand-edit a verified
+   file (an LLM rewrite that drops the group's other results is a silent-loss channel):
+   ```
+   python3 $SKILL/scripts/validate_output.py set-verdict --run-dir $RUN \
+     --group <gid of the finding to correct> --from-file $RUN/verified/arb-<gidA>-<gidB>.json
+   ```
+   This transplants **only** the matching result IDs into the group's `verified/<gid>.json`
+   (all other results preserved, then the file is re-validated). If the arbitration
+   upholds the already-confirmed side, no apply is needed — the report renders the
+   confirmed finding once and drops the FP one as usual.
+3. **Preserve the redundant detections.** Arbitration decides *which verdict is right*,
+   not *which group owns the finding* — both groups' findings stay in their own files.
+   Do **not** consolidate cross-group findings under one verifier as a routine: that
+   removes the redundant second detection that has rescued a real critical from a wrong
+   false-negative (see design doc). `log-issue` the conflict, the arbitration spawn, and
+   the outcome, and note the reconciliation in the report summary.
+
 ---
 
 ## Stage 4 — Report generation
@@ -480,8 +521,12 @@ Same for hunters and verifiers.
    attached list. Include in the reply "Read the output file first, then rewrite
    it" — a resumed agent's file state is reset, and a Write without Read (an
    overwrite) is rejected (empirically observed).
-2. **No response / crash (no output file at all)**: there is no counterpart to reply
-   to, so retry once with a **fresh agent spawn**.
+2. **No response / crash (no output file at all)**: **before treating it as a crash,
+   re-check the file exists** (`ls` the output path once). A "file absent" completion
+   notice has been observed to be stale while the file was already on disk (16954-byte
+   `verified/2.json`) — re-spawning on a stale notice is pure waste (a whole subagent,
+   ~200K tokens). Only if the file is genuinely absent, retry once with a **fresh agent
+   spawn**.
 3. **Fallback on second failure** (do not give up immediately — the price of giving
    up is an audit hole the size of the budget):
    - **Hunter**: one bisect retry.
@@ -495,6 +540,32 @@ Same for hunters and verifiers.
    - Only the subgroups/batches that still fail get
      `set-state ... --status failed`. They are named in the report as unverifiable
      groups (give up, but never conceal).
+
+### Recovery-message discipline (never dictate the verdict)
+
+A retry follow-up must carry **only the file state and the `validate_output.py` error**
+— the missing IDs, the schema violation, "Read then rewrite". **Never tell the agent
+which findings to confirm/reject, which severity to assign, or what conclusion to
+reach.** A "you dropped these, redo with this verdict set" message is prompt-injection
+by the orchestrator: it defeats the fresh-context independence (verifier) or the
+hypothesis independence (hunter) that the whole pipeline is built on. In the field a
+recovery message that named a verdict set was only stopped because the agent refused
+it — do not rely on that refusal. If a re-derivation genuinely looks wrong, that is a
+job for a fresh arbitration verifier (see cross-group conflict handling), not for a
+steering message. State the problem, not the answer.
+
+### Spend-limit / budget truncation ≠ license to verify inline
+
+If a verifier (or hunter) is truncated by a monthly-spend-limit or a mid-turn cutoff so
+its output never lands, **do not substitute orchestrator-inline verification**. Doing so
+once produced a non-comparable run (26 confirmed / 0 FP with no adversarial filtering,
+vs 16–18 confirmed with fresh verifiers) — inline verification has no fresh-context
+independence and silently disables the false-positive filter that is deep-code-audit's
+reason to exist. Instead: `log-issue`, leave the group `pending`/`retrying` in
+state.json, and **halt → resume** once budget is available. A stage may be slow; it may
+not be quietly downgraded to a weaker method. (This is why hunters/verifiers should
+Write incrementally — see the agent bodies — so a late truncation still leaves a
+partial file to resume from rather than nothing.)
 
 ### Mid-run type non-recognition = infrastructure failure (separate from the retry ladder)
 
@@ -520,6 +591,16 @@ python3 $SKILL/scripts/validate_output.py log-issue --run-dir $RUN --stage <stag
 **"An error occurred"-level summaries are forbidden** — this file (`issues.jsonl`) is
 the evidence base for post-hoc cause reconstruction and skill improvement. Symptom,
 context, action, outcome — precisely.
+
+### Per-spawn token accounting (cheap measurement for M4)
+
+When a hunter/verifier completion notice reports a subagent token count, **record it**
+with a `log-issue` line (`--stage <stage> --actor script`-style note, symptom =
+`"tokens: <n> (group <gid>, <mode>)"`). One field-run hunter cost ≈239K and a follow-up
+correction ≈26K — the ~9× gap between a fresh re-spawn and a same-agent follow-up is the
+core of the cost argument, but today it survives only as an ad-hoc note in one run. Making
+it routine turns every M4 cost claim from estimate into measurement, at the price of one
+log line per spawn.
 
 ### Skip/resume
 

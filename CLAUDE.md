@@ -9,7 +9,7 @@ plus a self-listing [marketplace.json](.claude-plugin/marketplace.json) making t
 repo directly installable). The `deep-code-audit` skill lives at
 [skills/deep-code-audit/SKILL.md](skills/deep-code-audit/SKILL.md) (orchestrator) together
 with its [references/](skills/deep-code-audit/references/) (task-prompt skeletons + schema
-spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 67 unit tests,
+spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 70 unit tests,
 standard library only); [agents/](agents/) (2 dedicated subagent definitions) sits at the
 **plugin root** — the spec's fixed component location (only plugin.json belongs inside
 `.claude-plugin/`). The single design document is
@@ -149,7 +149,7 @@ Key design decisions worth preserving when modifying this skill:
 - **Judgment belongs to the model, scripts do only deterministic work.** Project
   classification and finding scoring live in prompts, not heuristics; the 4 scripts are
   `select_targets.py`, `group_by_lines.py` (`build`/`subgroup`), `validate_output.py`
-  (`validate`/`init-state`/`set-state`/`route-hints`/`extract-claims`/`merge`/`log-issue`),
+  (`validate`/`init-state`/`set-state`/`set-verdict`/`route-hints`/`extract-claims`/`merge`/`log-issue`),
   and `build_report.py`.
 - **Silent degradation must be detected and surfaced.** Grouping records
   `cohesion: import-graph|line-balance-only` and `unparsed_source_exts` in groups.json and
@@ -167,9 +167,22 @@ Key design decisions worth preserving when modifying this skill:
   guard, survives adversarial rebuttal. Any criterion established as unmet kills the
   finding regardless of score (gate); score = met count with threshold 3 (unknowns
   tolerated, appraised further for critical/major); a concrete failure scenario is required
-  to confirm. Verdict consistency (gate/threshold/scenario/score/upgrade-requires-full) is
-  machine-checked by `validate_output.py`. Verifiers may re-grade severity, but upgrading a
-  minor requires full re-scoring.
+  to confirm. Verdict consistency (gate/threshold/scenario/upgrade-requires-full) is
+  machine-checked by `validate_output.py`; `score` is **auto-corrected** to the met count
+  (overwrite + warn, never a retry — it drives no decision). A **completeness gate** checks
+  every `defects/<gid>.json` finding ID is judged in `verified/<gid>.json` (a partial write
+  would silently vanish from the report, since `build_report` renders only what `results`
+  holds). The verifier body also carries a **false-negative defense**: a guard-trust
+  rejection of a critical/major finding must first show the guard survives the standard
+  attacker counter-moves (token splitting, encoding, path re-rooting, TOCTOU, provenance≠
+  integrity) — "the value is signed/validated upstream" alone is an incomplete rebuttal.
+  Verifiers may re-grade severity, but upgrading a minor requires full re-scoring. When the
+  **same defect is judged oppositely by two groups' verifiers**, the orchestrator does not
+  resolve it inline (single-perspective, non-reproducible) but spawns a **fresh arbitration
+  verifier** over both findings; its verdict is transplanted deterministically by
+  `validate_output.py set-verdict` (replace-by-ID, all other results preserved), and the
+  redundant per-group detections are kept (the redundancy is what rescues a critical from a
+  wrong single-verifier false-negative).
 - **Anti-anchoring in verification**: verifiers get claims (id/location/claim/severity)
   embedded without rationale, must record an independent `rederivation` for every finding
   before opening `defects/<gid>.json`, and escalate to a 2-turn split if parroting is

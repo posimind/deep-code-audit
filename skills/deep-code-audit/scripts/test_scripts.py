@@ -626,7 +626,8 @@ class TestValidateVerified(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._v(obj)
 
-    def test_score_mismatch_fails(self):
+    def test_score_mismatch_autocorrects(self):
+        # A-2: score≠met 은 재시도가 아니라 met 로 자동보정하고 통과·재저장한다.
         obj = {"group_id": 3, "results": [{
             "id": "g3-005", "verdict": "false_positive", "rubric": "full", "score": 5,
             "rederivation": "x",
@@ -636,8 +637,88 @@ class TestValidateVerified(unittest.TestCase):
             "severity_final": "minor",
             "reject_reason": "기준 ② reachable unmet — cfg.py:3 플래그 상시 off"}],
             "issues": []}
-        with self.assertRaises(SystemExit):
-            self._v(obj)  # score 5 인데 met 4
+        self._v(obj)  # score 5 인데 met 4 → 보정
+        out = rj(os.path.join(self.run, "verified", "3.json"))
+        self.assertEqual(out["results"][0]["score"], 4)  # met 로 덮임
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["verify"]["3"], "done")
+
+    def _defects_two(self):
+        # defects/3.json 에 finding 2개(g3-001, g3-002)를 심어 완전성 게이트 입력 마련.
+        d = base_defects(3)
+        d["findings"].append({
+            "id": "g3-002", "pass": "primary", "category": "logic",
+            "severity": "minor", "confidence": "low",
+            "location": {"file": "api/search.py", "start": 60, "end": 62,
+                         "symbol": "helper"},
+            "claim": "보조 결함", "rationale": "근거"})
+        wj(os.path.join(self.run, "defects", "3.json"), d)
+
+    def _confirmed_result(self, fid):
+        return {
+            "id": fid, "verdict": "confirmed", "rubric": "full", "score": 5,
+            "rederivation": "재도출함",
+            "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
+                         "no_guard": "met", "survives_rebuttal": "met"},
+            "entry_path": "main → /search → handle_search:42",
+            "guard_scan": ["호출부"], "rebuttal": "반론 — 실패",
+            "severity_final": "minor",
+            "failure_scenario": "시나리오", "fix_sample": "x", "fix_direction": "y",
+            "appraisal": []}
+
+    def test_completeness_gate_fails_on_uncovered_finding(self):
+        # A-1: defects 에 있는 finding 이 verified 결과에 빠지면 게이트가 재시도(code 3).
+        self._defects_two()
+        obj = {"group_id": 3, "results": [self._confirmed_result("g3-001")],
+               "issues": []}  # g3-002 누락
+        with self.assertRaises(SystemExit) as cm:
+            self._v(obj)
+        self.assertEqual(cm.exception.code, 3)
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertNotEqual(st["stages"].get("verify", {}).get("3"), "done")
+
+    def test_completeness_gate_passes_when_all_covered(self):
+        # A-1: 전체 finding 이 판정되면 통과.
+        self._defects_two()
+        obj = {"group_id": 3, "results": [self._confirmed_result("g3-001"),
+                                          self._confirmed_result("g3-002")],
+               "issues": []}
+        self._v(obj)
+        st = rj(os.path.join(self.run, "state.json"))
+        self.assertEqual(st["stages"]["verify"]["3"], "done")
+
+    def test_set_verdict_transplants_only_matching_ids(self):
+        # C-2: 중재 산출의 g3-001 판정만 이식, g3-002 는 원본 그대로 보존.
+        base = {"group_id": "3", "results": [self._confirmed_result("g3-001"),
+                                             self._confirmed_result("g3-002")],
+                "issues": []}
+        wj(os.path.join(self.run, "verified", "3.json"), base)
+        # 중재: g3-001 을 false_positive 로 뒤집음 + g5 소관 ID(무시돼야 함).
+        arb = {"group_id": "arb", "results": [
+            {"id": "g3-001", "verdict": "false_positive", "rubric": "full", "score": 1,
+             "rederivation": "중재 재도출", "reject_reason": "기준 ④ no_guard unmet — "
+             "상류 서명이 이 필드를 덮음",
+             "criteria": {"does_this": "met", "reachable": "unknown",
+                          "harmful": "unmet", "no_guard": "unmet",
+                          "survives_rebuttal": "unknown"},
+             "severity_final": "minor"},
+            {"id": "g5-999", "verdict": "confirmed", "rubric": "full", "score": 5,
+             "rederivation": "다른 그룹", "failure_scenario": "x",
+             "entry_path": "e", "guard_scan": ["g"], "rebuttal": "r",
+             "criteria": {"does_this": "met", "reachable": "met", "harmful": "met",
+                          "no_guard": "met", "survives_rebuttal": "met"},
+             "severity_final": "critical"}],
+            "issues": []}
+        wj(os.path.join(self.run, "verified", "arb-3-5.json"), arb)
+        vo.cmd_set_verdict(_ns(run_dir=self.run, group="3",
+                               from_file=os.path.join(self.run, "verified",
+                                                      "arb-3-5.json")))
+        out = rj(os.path.join(self.run, "verified", "3.json"))
+        by = {r["id"]: r for r in out["results"]}
+        self.assertEqual(by["g3-001"]["verdict"], "false_positive")  # 이식됨
+        self.assertEqual(by["g3-002"]["verdict"], "confirmed")       # 보존됨
+        self.assertNotIn("g5-999", by)                               # 타그룹 무시
+        self.assertEqual(len(out["results"]), 2)                     # 개수 불변
 
     def test_duplicate_reject_full_met_passes(self):
         # 중복 보고 기각: unmet 없이 met≥3 이어도 reject_reason + appraisal 이면 유효

@@ -4,6 +4,8 @@
 판단은 모델에게, 기계적 작업만 스크립트에게. 이 스크립트는 다음만 한다(전부 결정적):
   validate       스키마 검증 + low 심각도 강등 + coverage 대조 + 자기중복 의심 경고
                  + 산출 언어(고신호 산문 필드 한글 전무) 경고 + issues 병합 + state=done
+                 (verify 단계: score≠met 자동보정[A-2, 재시도 아님] + verified 가
+                 defects 전체 finding ID 를 판정했는지 완전성 게이트[A-1])
   route-hints    cross_refs 수집 → 소유 그룹 라우팅 → 커버·기라우팅 대조 →
                  hints/<gid>.json (--residue-check: 미소진 힌트 → hints/residue.json)
   extract-claims defects → claims/<gid>.json (rationale 제거)
@@ -11,6 +13,7 @@
                  sweep/second cross_refs 를 base 로 보존 병합)
   init-state     groups.json → state.json (전부 pending)
   set-state      단계/그룹 상태를 retrying|failed|done 로 갱신 (오케스트레이터용)
+  set-verdict    교차그룹 충돌 중재 결과를 verified 에 결정적 이식 (C-2, 오케스트레이터용)
   log-issue      issues.jsonl append (오케스트레이터용)
 
 스키마 명세: references/schemas.md. 검증 실패는 nonzero exit + stderr 메시지 →
@@ -239,6 +242,12 @@ def hangul_missing_ids(items, fields):
 # --- verified 검증 ---------------------------------------------------------
 
 def validate_result(r, i):
+    """검증 결과 하나를 스키마·일관성 검사한다.
+
+    반환: score 를 자동보정했으면 (id, 원래값, 보정값) 튜플, 아니면 None
+    (A-2). score 는 met 개수의 결정적 함수라 에이전트가 틀리게 적어도 재시도할
+    이유가 없다 — 스크립트가 met 로 덮고 경고만 남긴다(재시도 클래스 제거).
+    """
     tag = f"results[{i}]"
     _req(isinstance(r.get("id"), str) and r["id"], f"{tag}.id 필요")
     _req(r.get("verdict") in VERDICTS, f"{tag}.verdict ∈ {sorted(VERDICTS)} 필요")
@@ -264,7 +273,13 @@ def validate_result(r, i):
 
     met = sum(1 for v in crit.values() if v == "met")
     has_unmet = any(v == "unmet" for v in crit.values())
-    _req(r["score"] == met, f"{tag}.score({r['score']}) ≠ met 개수({met})")
+    # score 자동보정(A-2): score 는 어떤 게이트/임계 판정에도 쓰이지 않고(전부 met
+    # 로 계산) 오직 met 와 같아야 한다는 값이라, 불일치는 재시도가 아니라 덮어쓰기로
+    # 해소한다. 보정 사실은 상위(validate_verified→cmd_validate)에서 경고로 표면화.
+    corrected = None
+    if r["score"] != met:
+        corrected = (r["id"], r["score"], met)
+        r["score"] = met
 
     # 격상 시 풀 룰브릭 의무.
     _req(not (r["rubric"] == "light" and r["severity_final"] in {"critical", "major"}),
@@ -318,15 +333,22 @@ def validate_result(r, i):
                  f"{tag}: 임계 미달 기각(unmet 없는 full false_positive)인데 appraisal "
                  f"비어 있음(규칙 9) — 기각 전 unknown 기준의 해소 시도 이력을 남겨야 함")
 
+    return corrected
+
 
 def validate_verified(obj):
+    """반환: score 자동보정 목록(A-2). 비어 있지 않으면 호출자가 파일을 다시 써야 한다."""
     _req("group_id" in obj, "group_id 필요")
     _req(isinstance(obj.get("results"), list), "results 리스트 필요")
     ids = set()
+    corrections = []
     for i, r in enumerate(obj["results"]):
-        validate_result(r, i)
+        c = validate_result(r, i)
+        if c:
+            corrections.append(c)
         _req(r["id"] not in ids, f"result id 중복: {r['id']}")
         ids.add(r["id"])
+    return corrections
 
 
 # --- 커맨드: validate ------------------------------------------------------
@@ -369,9 +391,45 @@ def cmd_validate(args):
         _fail(run_dir, stage, gid, f"JSON 파싱 실패: {e}", target,
               actor=_actor(stage), code=2)
 
+    verify_corrections = []
     try:
         if stage == "verify":
-            validate_verified(obj)
+            verify_corrections = validate_verified(obj)
+            # score 자동보정 경고(A-2): 불합격이 아니라 met 로 덮고 파일을 다시 쓴다.
+            if verify_corrections:
+                detail = ", ".join(f"{cid}:{old}→{new}"
+                                   for cid, old, new in verify_corrections)
+                append_issue(run_dir, stage, gid, "script",
+                             f"score≠met 자동보정 {len(verify_corrections)}건: {detail}",
+                             "validate score 결정론화(A-2)",
+                             "met 개수로 덮어쓰고 재저장(재시도 없음)", "완료")
+                print(f"[validate:WARN] verify g{gid}: score≠met 자동보정 {detail} "
+                      f"— 재시도 없이 met 값으로 저장", file=sys.stderr)
+            # A-1 완전성 게이트: verified 결과가 defects 전체 finding ID 를 커버하는지.
+            # build_report 는 verified 결과만 순회하므로, 미커버 finding 은 confirmed
+            # 에도 FP 에도 안 잡혀 보고서에서 사라진다(silent-loss). 지금까지 3런 모두
+            # 오케스트레이터 수동 포착으로 막혔을 뿐 — 기계 게이트로 요행 의존을 제거.
+            # (--file 우회 = batch 개별 검증이라 부분집합이 정상 → 게이트 건너뜀.)
+            if not args.file:
+                dpath = os.path.join(run_dir, "defects", f"{gid}.json")
+                if os.path.exists(dpath):
+                    try:
+                        did = {f["id"]
+                               for f in load_json(dpath).get("findings", [])}
+                    except (OSError, json.JSONDecodeError, KeyError):
+                        did = set()
+                    uncovered = sorted(did - {r["id"] for r in obj["results"]})
+                    if uncovered:
+                        append_issue(run_dir, stage, gid, "script",
+                                     f"검증 누락 {len(uncovered)}건: {uncovered}",
+                                     "완전성 게이트(A-1) — defects vs verified ID 대조",
+                                     "미판정 ID 목록 첨부해 재시도 요청", "재시도 대기")
+                        _fail(run_dir, stage, gid,
+                              "검증 누락(부분 산출 의심): defects 의 다음 finding 이 "
+                              "verified 결과에 없습니다. 먼저 산출 파일을 Read 한 뒤, "
+                              "아래 ID 를 모두 판정에 포함해 다시 제출하세요:\n  - "
+                              + "\n  - ".join(uncovered), target,
+                              actor=_actor(stage), code=3, already_logged=True)
             # impact 누락 경고(불합격 아님 — 구 런 재개 호환). impact 는 보고서의
             # 독자용 "실질 영향 한 줄"이라 없어도 정합성은 깨지지 않지만, 누락은
             # 보고 품질의 조용한 저하이므로 issues.jsonl 에 남겨 추적한다.
@@ -456,8 +514,10 @@ def cmd_validate(args):
     except ValidationError as e:
         _fail(run_dir, stage, gid, str(e), target, actor=_actor(stage), code=2)
 
-    # 변경분(low 강등) 반영 저장.
-    if stage != "verify":
+    # 변경분 반영 저장: hunt/sweep/second 는 low 강등, verify 는 score 자동보정(A-2)
+    # 이 있었을 때만. build_report 가 verified 의 score 를 그대로 렌더하므로 보정값을
+    # 영속해야 보고서의 검증 점수가 met 와 일치한다.
+    if stage != "verify" or verify_corrections:
         save_json(target, obj)
 
     # 서브에이전트 issues 병합 → issues.jsonl.
@@ -745,6 +805,48 @@ def cmd_init_state(args):
     return 0
 
 
+def cmd_set_verdict(args):
+    """C-2: 교차그룹 판정 충돌의 중재 결과를 그룹 verified 파일에 결정적으로 적용.
+
+    중재 검증자(fresh deep-audit-verifier)가 두 그룹의 충돌 finding 을 함께 재도출해
+    낸 산출(--from-file)에서, 대상 그룹 verified 에 **이미 존재하는 ID 만** 골라
+    그 result 를 통째로 교체한다(나머지 result 는 전부 보존 — LLM 이 파일을 다시 쓰면
+    다른 result 가 소실되는 silent-loss 채널이라, 이식은 스크립트가 결정적으로 한다).
+    판단은 중재 검증자(모델)가, 이식은 스크립트가 — 원칙 유지.
+    """
+    run_dir, gid = args.run_dir, str(args.group)
+    base_path = os.path.join(run_dir, "verified", f"{gid}.json")
+    _req(os.path.exists(base_path), f"대상 verified 파일 없음: {base_path}")
+    base = load_json(base_path)
+    arb = load_json(args.from_file)
+    base_by_id = {r["id"]: r for r in base.get("results", [])}
+    arb_by_id = {r["id"]: r for r in arb.get("results", [])}
+    # 대상 그룹 verified 에 이미 있는 ID 만 이식(새 ID 추가 금지 — 완전성 게이트가
+    # defects 대비로 요구하는 집합을 그대로 유지). 없는 ID 는 다른 그룹 소관.
+    apply_ids = [i for i in arb_by_id if i in base_by_id]
+    _req(apply_ids,
+         f"이식할 ID 없음 — {args.from_file} 의 result 중 g{gid} verified 에 있는 것이 "
+         f"없습니다(그룹 지정 오류 의심)")
+    for i in apply_ids:
+        base_by_id[i].clear()
+        base_by_id[i].update(arb_by_id[i])
+    # 교체 후 정합성 재검증(score 자동보정 포함) — 실패 시 저장하지 않음.
+    try:
+        corrections = validate_verified(base)
+    except ValidationError as e:
+        _fail(run_dir, "verify", gid,
+              f"중재 이식 후 정합성 불합격: {e}", base_path,
+              actor="verifier", code=2)
+    save_json(base_path, base)
+    append_issue(run_dir, "verify", gid, "orchestrator",
+                 f"교차그룹 충돌 중재 적용: {apply_ids} 를 {os.path.basename(args.from_file)} "
+                 f"기준으로 교체(score 보정 {len(corrections)})",
+                 "set-verdict(C-2)", "verified/<gid>.json 갱신", "완료")
+    print(f"[set-verdict] g{gid}: applied {apply_ids} from "
+          f"{os.path.basename(args.from_file)}")
+    return 0
+
+
 def cmd_set_state(args):
     group = None if args.group in (None, "", "-") else args.group
     set_stage_status(args.run_dir, args.stage, group, args.status)
@@ -807,6 +909,14 @@ def main(argv=None):
     s.add_argument("--status", required=True,
                    choices=["pending", "retrying", "done", "failed"])
     s.set_defaults(func=cmd_set_state)
+
+    sv = sub.add_parser("set-verdict",
+                        help="교차그룹 충돌 중재 결과를 verified 에 이식(C-2)")
+    sv.add_argument("--run-dir", required=True)
+    sv.add_argument("--group", required=True)
+    sv.add_argument("--from-file", required=True,
+                    help="중재 검증자 산출(verified 형식) 경로")
+    sv.set_defaults(func=cmd_set_verdict)
 
     li = sub.add_parser("log-issue", help="issues.jsonl append")
     li.add_argument("--run-dir", required=True)

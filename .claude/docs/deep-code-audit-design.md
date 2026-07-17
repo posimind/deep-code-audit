@@ -21,7 +21,7 @@ The implementation is a plugin:
 - [.claude-plugin/plugin.json](../../.claude-plugin/plugin.json) — manifest (+ self-listing marketplace.json)
 - [skills/deep-code-audit/SKILL.md](../../skills/deep-code-audit/SKILL.md) — orchestrator
 - [references/](../../skills/deep-code-audit/references/) — task-prompt skeletons, schemas, report format
-- [scripts/](../../skills/deep-code-audit/scripts/) — 4 Python scripts + 67 unit tests (standard library only)
+- [scripts/](../../skills/deep-code-audit/scripts/) — 4 Python scripts + 70 unit tests (standard library only)
 - [agents/](../../agents/) — 2 dedicated subagents (hunter, verifier)
 
 The core idea fits in one sentence: **a two-stage structure of lenient adversarial
@@ -49,7 +49,11 @@ reasoning, hypothesis-driven detection, and adversarial self-rebuttal capabiliti
 3. **Hypothesis-driven detection, no checklists.** Matching against a vulnerability
    pattern list misses everything outside the list. Hunters trace trust boundaries, data
    flows, and state transitions, form hypotheses about "what could break here," and
-   confirm them in the code.
+   confirm them in the code. (A user's explicit "make sure to check X" is not an
+   exception to this: it enters the brief as a lens/premise — `lens_priority`,
+   `high_risk_areas`, or `environment` — that seeds hypotheses, and the hunter still
+   looks beyond it. A seed the hunter starts from is not the terminal checklist this
+   principle rejects.)
 4. **Detect leniently, verify adversarially — but asymmetrically.** Critical/major
    candidates are recorded even at low confidence; minor ones only when obvious.
 5. **Stage-to-stage handoff must go through files.** Every artifact is written to disk as
@@ -284,7 +288,7 @@ skills/deep-code-audit/
     group_by_lines.py              # cohesion grouping & min-cut split / bisection
     validate_output.py             # validation, state, routing, claims, merge, issue log
     build_report.py                # Korean report rendering & splitting
-    test_scripts.py                # 67 unit tests
+    test_scripts.py                # 70 unit tests
 agents/                            # dedicated subagents (body = invariant protocol)
   deep-audit-hunter.md             # hunter (primary/sweep/second_pass, 3 modes)
   deep-audit-verifier.md           # verifier (single/batch/2-turn split)
