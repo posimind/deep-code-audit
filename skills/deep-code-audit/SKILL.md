@@ -473,7 +473,11 @@ field but carries no independence guarantee and leaves no reproducible verdict.
    This transplants **only** the matching result IDs into the group's `verified/<gid>.json`
    (all other results preserved, then the file is re-validated). If the arbitration
    upholds the already-confirmed side, no apply is needed — the report renders the
-   confirmed finding once and drops the FP one as usual.
+   confirmed finding once and drops the FP one as usual. Either way the arb file
+   **stays at `verified/arb-*.json`** (do not move or delete it): the authoritative
+   verdicts always live in the groups' `verified/<gid>.json`, so `build_report.py`
+   excludes `arb-*` from its scan **by name** — counting it would double-count the
+   same finding. Keep this exclusion in mind when touching the report glob.
 3. **Preserve the redundant detections.** Arbitration decides *which verdict is right*,
    not *which group owns the finding* — both groups' findings stay in their own files.
    Do **not** consolidate cross-group findings under one verifier as a routine: that

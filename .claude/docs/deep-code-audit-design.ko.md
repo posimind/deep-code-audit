@@ -19,7 +19,7 @@ Claude Code 스킬이다. 구현물은 플러그인 구조다:
 - [.claude-plugin/plugin.json](../../.claude-plugin/plugin.json) — 매니페스트 (+자기 등재 marketplace.json)
 - [skills/deep-code-audit/SKILL.md](../../skills/deep-code-audit/SKILL.md) — 오케스트레이터
 - [references/](../../skills/deep-code-audit/references/) — 태스크 프롬프트 골격·스키마·보고서 서식
-- [scripts/](../../skills/deep-code-audit/scripts/) — Python 스크립트 4종 + 테스트 70종 (표준 라이브러리만)
+- [scripts/](../../skills/deep-code-audit/scripts/) — Python 스크립트 4종 + 테스트 73종 (표준 라이브러리만)
 - [agents/](../../agents/) — 전용 서브에이전트 2종 (헌터·검증자)
 
 핵심 아이디어는 한 문장이다: **관대한 적대적 탐지 → 엄격한 적대적 검증의 2단 구조로,
@@ -243,7 +243,7 @@ skills/deep-code-audit/
     group_by_lines.py              # 응집 그룹핑·최소 절단 분할 / 이분할
     validate_output.py             # 검증·상태·라우팅·발췌·병합·이슈 기록
     build_report.py                # 한국어 보고서 렌더·분할
-    test_scripts.py                # 단위 테스트 70종
+    test_scripts.py                # 단위 테스트 73종
 agents/                            # 전용 서브에이전트 (본문 = 불변 프로토콜)
   deep-audit-hunter.md             # 헌터 (primary/sweep/second_pass 겸용)
   deep-audit-verifier.md           # 검증자 (단일/batch/2턴 분리 공용)

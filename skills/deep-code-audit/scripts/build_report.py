@@ -25,6 +25,9 @@ CAT_KO = {"security": "보안", "concurrency": "동시성", "fault": "결함 처
 CRITERION_MARK = {"does_this": "①", "reachable": "②", "harmful": "③",
                   "no_guard": "④", "survives_rebuttal": "⑤"}
 SPLIT_THRESHOLD = 15
+# 보고서 전용 파일명 — 재생성 시 이름 기준으로 선(先)정리한다(분할 ↔ 단일 전환에서
+# 이전 포맷이 잔존하면 어느 쪽이 최종본인지 독자가 알 수 없다).
+REPORT_NAMES = ("감사보고서.md", "00_요약.md", "01_critical_major.md", "02_minor.md")
 
 # 코드 펜스 언어 태그(문법 강조용) — 매핑 없는 확장자는 태그 없이 렌더.
 LANG_BY_EXT = {
@@ -68,14 +71,22 @@ def collect(run_dir):
             if c.get("path") and c.get("role"):
                 file_roles.setdefault(c["path"], c["role"])
 
-    confirmed, fp_count, groups_seen = [], 0, set()
+    confirmed, fp_count, groups_seen, seen_ids = [], 0, set(), set()
     for p in sorted(glob.glob(os.path.join(verified_dir, "*.json"))):
         base = os.path.basename(p)
-        if "batch-" in base:
+        # batch-*: 병합 이전 조각. arb-*: 3c 교차그룹 중재 산출 — 권위 판정은 항상
+        # 그룹 verified/<gid>.json 에 있다(apply 면 set-verdict 가 이식했고, uphold 면
+        # 그룹 파일이 이미 옳다). 함께 집계하면 동일 발견이 이중집계된다.
+        if "batch-" in base or base.startswith("arb-"):
             continue
         obj = load_json(p)
         groups_seen.add(str(obj.get("group_id")))
         for r in obj.get("results", []):
+            # 심층 방어 — 발견 ID 는 g<gid>- 접두로 전역 유일하므로, 어떤 경로로든
+            # 같은 ID 가 다시 보이면 이미 집계된 결과다(정렬상 그룹 파일이 먼저 온다).
+            if r["id"] in seen_ids:
+                continue
+            seen_ids.add(r["id"])
             if r["verdict"] != "confirmed":
                 fp_count += 1
                 continue
@@ -401,23 +412,33 @@ def main(argv=None):
     run_dir = args.run_dir
     out_dir = args.out_dir or run_dir
     confirmed, fp_count, file_roles = collect(run_dir)
-    written = []
 
+    # 렌더를 메모리에 먼저 완성한다 — 이 단계에서 실패하면(groups.json 부재 등)
+    # 기존 보고서가 그대로 남는다. stale 정리를 렌더보다 앞세우면 실패 시 직전
+    # 보고서만 파괴된 채 종료하는 창이 생긴다.
     if len(confirmed) > SPLIT_THRESHOLD:
-        written.append(write(out_dir, "00_요약.md",
-                             render_summary(run_dir, confirmed, fp_count, split=True)))
         cm = [r for r in confirmed if r["severity"] in ("critical", "major")]
         mn = [r for r in confirmed if r["severity"] == "minor"]
-        written.append(write(out_dir, "01_critical_major.md",
-                             render_findings_section("Critical / Major 상세", cm,
-                                                     file_roles)))
-        written.append(write(out_dir, "02_minor.md",
-                             render_findings_section("Minor 상세", mn, file_roles)))
+        outputs = [
+            ("00_요약.md",
+             render_summary(run_dir, confirmed, fp_count, split=True)),
+            ("01_critical_major.md",
+             render_findings_section("Critical / Major 상세", cm, file_roles)),
+            ("02_minor.md",
+             render_findings_section("Minor 상세", mn, file_roles)),
+        ]
     else:
         parts = [render_summary(run_dir, confirmed, fp_count, split=False)]
         parts.append("---")
         parts.append(render_findings_section("발견 상세", confirmed, file_roles))
-        written.append(write(out_dir, "감사보고서.md", "\n\n".join(parts)))
+        outputs = [("감사보고서.md", "\n\n".join(parts))]
+
+    for stale in REPORT_NAMES:
+        try:
+            os.remove(os.path.join(out_dir, stale))
+        except FileNotFoundError:
+            pass
+    written = [write(out_dir, name, text) for name, text in outputs]
 
     print(json.dumps({"written": [os.path.relpath(p, out_dir) for p in written],
                       "confirmed": len(confirmed), "false_positive": fp_count},

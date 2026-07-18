@@ -21,7 +21,7 @@ The implementation is a plugin:
 - [.claude-plugin/plugin.json](../../.claude-plugin/plugin.json) — manifest (+ self-listing marketplace.json)
 - [skills/deep-code-audit/SKILL.md](../../skills/deep-code-audit/SKILL.md) — orchestrator
 - [references/](../../skills/deep-code-audit/references/) — task-prompt skeletons, schemas, report format
-- [scripts/](../../skills/deep-code-audit/scripts/) — 4 Python scripts + 70 unit tests (standard library only)
+- [scripts/](../../skills/deep-code-audit/scripts/) — 4 Python scripts + 73 unit tests (standard library only)
 - [agents/](../../agents/) — 2 dedicated subagents (hunter, verifier)
 
 The core idea fits in one sentence: **a two-stage structure of lenient adversarial
@@ -288,7 +288,7 @@ skills/deep-code-audit/
     group_by_lines.py              # cohesion grouping & min-cut split / bisection
     validate_output.py             # validation, state, routing, claims, merge, issue log
     build_report.py                # Korean report rendering & splitting
-    test_scripts.py                # 70 unit tests
+    test_scripts.py                # 73 unit tests
 agents/                            # dedicated subagents (body = invariant protocol)
   deep-audit-hunter.md             # hunter (primary/sweep/second_pass, 3 modes)
   deep-audit-verifier.md           # verifier (single/batch/2-turn split)

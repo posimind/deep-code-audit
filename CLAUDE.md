@@ -9,7 +9,7 @@ plus a self-listing [marketplace.json](.claude-plugin/marketplace.json) making t
 repo directly installable). The `deep-code-audit` skill lives at
 [skills/deep-code-audit/SKILL.md](skills/deep-code-audit/SKILL.md) (orchestrator) together
 with its [references/](skills/deep-code-audit/references/) (task-prompt skeletons + schema
-spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 70 unit tests,
+spec) and [scripts/](skills/deep-code-audit/scripts/) (4 Python scripts + 73 unit tests,
 standard library only); [agents/](agents/) (2 dedicated subagent definitions) sits at the
 **plugin root** — the spec's fixed component location (only plugin.json belongs inside
 `.claude-plugin/`). The single design document is
@@ -50,7 +50,7 @@ Rust-parser improvement round; its run directory is no longer kept in this repo.
 
 ### Commands
 
-- **Unit tests** (67, no external deps): `python3 skills/deep-code-audit/scripts/test_scripts.py`
+- **Unit tests** (73, no external deps): `python3 skills/deep-code-audit/scripts/test_scripts.py`
 - **Compile check**: `python3 -m py_compile skills/deep-code-audit/scripts/*.py`
 - **Plugin manifest check**: `claude plugin validate . --strict`
 
@@ -182,7 +182,11 @@ Key design decisions worth preserving when modifying this skill:
   verifier** over both findings; its verdict is transplanted deterministically by
   `validate_output.py set-verdict` (replace-by-ID, all other results preserved), and the
   redundant per-group detections are kept (the redundancy is what rescues a critical from a
-  wrong single-verifier false-negative).
+  wrong single-verifier false-negative). The arb file stays at `verified/arb-*.json`;
+  `build_report.py` excludes it (and `batch-*` fragments) from its scan **by name** and
+  dedupes result IDs — the authoritative verdicts always live in the groups'
+  `verified/<gid>.json`, and counting arb files double-counts findings (field-observed
+  2026-07-18).
 - **Anti-anchoring in verification**: verifiers get claims (id/location/claim/severity)
   embedded without rationale, must record an independent `rederivation` for every finding
   before opening `defects/<gid>.json`, and escalate to a 2-turn split if parroting is

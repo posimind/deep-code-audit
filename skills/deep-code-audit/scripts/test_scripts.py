@@ -1275,6 +1275,53 @@ class TestBuildReport(unittest.TestCase):
         summary = open(os.path.join(self.run, "00_요약.md"), encoding="utf-8").read()
         self.assertIn("Critical", summary)
 
+    def test_arb_file_excluded_from_report(self):
+        # 3c 중재 산출(verified/arb-*.json)은 이름으로 집계 제외 — 권위 판정은 항상
+        # 그룹 verified/<gid>.json 에 있어(apply 면 set-verdict 이식, uphold 면 그룹
+        # 파일이 이미 옳음), 함께 세면 동일 발견이 이중집계된다(run 20260718 실측).
+        self._seed(2)
+        v = rj(os.path.join(self.run, "verified", "3.json"))
+        dup = dict(v["results"][0])          # g3-000 confirmed 를 중재가 재확인(uphold)
+        fp = dict(v["results"][1])
+        fp.update({"id": "g9-001", "verdict": "false_positive",
+                   "reject_reason": "중복"})
+        wj(os.path.join(self.run, "verified", "arb-9-3.json"),
+           {"group_id": 3, "results": [dup, fp], "issues": []})
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertEqual(text.count("**ID**: `g3-000`"), 1)
+        self.assertIn("| **합계** | **2** |", text)
+        self.assertIn("오탐(false positive): 0건", text)
+
+    def test_duplicate_id_counted_once(self):
+        # 심층 방어(dedup): arb 아닌 보조 파일이 verified/ 에 생겨도 동일 ID 는 1회만
+        # 집계된다. 정렬상 그룹 파일(3.json)이 먼저 와 그룹 판정이 채택된다.
+        self._seed(1)
+        v = rj(os.path.join(self.run, "verified", "3.json"))
+        wj(os.path.join(self.run, "verified", "zz-extra.json"),
+           {"group_id": 3, "results": [dict(v["results"][0])], "issues": []})
+        build_report.main(["--run-dir", self.run])
+        text = open(os.path.join(self.run, "감사보고서.md"), encoding="utf-8").read()
+        self.assertEqual(text.count("**ID**: `g3-000`"), 1)
+        self.assertIn("| **합계** | **1** |", text)
+
+    def test_stale_format_cleaned_on_regenerate(self):
+        # 분할 ↔ 단일 전환 시 이전 포맷이 잔존하면 어느 쪽이 최종본인지 알 수 없다 —
+        # 재생성은 보고서 4파일을 선정리해 출력 디렉터리에 항상 한 포맷만 남긴다.
+        split_names = ("00_요약.md", "01_critical_major.md", "02_minor.md")
+        self._seed(18)
+        build_report.main(["--run-dir", self.run])
+        for name in split_names:
+            self.assertTrue(os.path.exists(os.path.join(self.run, name)), name)
+        self._seed(3)   # 15건 이하로 재생성 → 단일 포맷, 분할 3파일 제거
+        build_report.main(["--run-dir", self.run])
+        self.assertTrue(os.path.exists(os.path.join(self.run, "감사보고서.md")))
+        for name in split_names:
+            self.assertFalse(os.path.exists(os.path.join(self.run, name)), name)
+        self._seed(18)  # 다시 분할 → 단일 파일이 잔존하지 않아야
+        build_report.main(["--run-dir", self.run])
+        self.assertFalse(os.path.exists(os.path.join(self.run, "감사보고서.md")))
+
 
 class TestEndToEndCLI(unittest.TestCase):
     """스크립트를 서브프로세스 CLI 로 호출하는 스모크 테스트."""

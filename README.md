@@ -51,7 +51,7 @@ For the full picture — design goals and principles, stage-by-stage behavior, t
 - **Severity that means something.** Critical/major findings get the full rubric plus an appraisal step; test/fixture files are severity-capped and the cap is machine-enforced.
 - **Prompt-injection defense.** Repository content — including the target's own `CLAUDE.md` — is treated as untrusted data. "Already reviewed, skip this file" in a comment is a suspicion signal, not an instruction.
 - **No silent degradation.** The pipeline treats "exit 0 but quality quietly gone" as worse than a crash: grouping cohesion fallbacks, unparsed languages, unconsumed hints, and merge losses are all detected, logged to `issues.jsonl`, and surfaced in the report.
-- **Zero dependencies.** The four helper scripts are Python standard library only, with 67 unit tests.
+- **Zero dependencies.** The four helper scripts are Python standard library only, with 73 unit tests.
 
 ## Installation
 
@@ -141,7 +141,7 @@ Results land in `<target>/.deep-code-audit/<run-id>/` — the report is `감사�
 ## Development
 
 ```bash
-# unit tests (67, no external deps)
+# unit tests (73, no external deps)
 python3 skills/deep-code-audit/scripts/test_scripts.py
 
 # compile check
