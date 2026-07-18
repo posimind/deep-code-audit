@@ -9,6 +9,7 @@
     {
       "name": "deep-code-audit",
       "source": "./",
+      "version": "26.07.18",
       "description": "Multi-agent adversarial code audit producing a Korean-language defect report."
     }
   ]

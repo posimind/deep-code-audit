@@ -48,6 +48,16 @@ starts are not recognized until restart — Stage 0 preflight checks this. (A fi
 against the ssam repo, 2026-07-02, produced the problem-analysis report that motivated the
 Rust-parser improvement round; its run directory is no longer kept in this repo.)
 
+### Versioning
+
+The plugin version uses the **`yy.mm.dd` date form** (e.g. `26.07.18`) and lives in two
+places that must stay identical: `version` in
+[.claude-plugin/plugin.json](.claude-plugin/plugin.json) and `plugins[0].version` in
+[.claude-plugin/marketplace.json](.claude-plugin/marketplace.json). **Whenever this repo's
+content is modified** (skill, agents, scripts, references, docs), set both to the current
+date in the same commit, then run `claude plugin validate . --strict`. Same-day changes
+share one version — no suffix.
+
 ### Commands
 
 - **Unit tests** (73, no external deps): `python3 skills/deep-code-audit/scripts/test_scripts.py`
