@@ -53,6 +53,25 @@ For the full picture — design goals and principles, stage-by-stage behavior, t
 - **No silent degradation.** The pipeline treats "exit 0 but quality quietly gone" as worse than a crash: grouping cohesion fallbacks, unparsed languages, unconsumed hints, and merge losses are all detected, logged to `issues.jsonl`, and surfaced in the report.
 - **Zero dependencies.** The four helper scripts are Python standard library only, with 73 unit tests.
 
+## Cost: this run is not cheap
+
+Be aware before you start: `deep-code-audit` analyzes the **entire codebase in parallel through many subagents**, so a single run can consume a substantial amount of tokens.
+
+For an objective reference point, here is a real run against [mobis-oss/ssam](https://github.com/mobis-oss/ssam):
+
+| | Consumption for one full audit of `ssam` |
+|---|---|
+| **Claude Max 5x** | ~75% of a single 5-hour session quota |
+| **Claude API** | ~$70 worth of tokens |
+
+Scale roughly with codebase size, number of groups, and how many findings survive into verification.
+
+### Cutting the cost with codebase-memory-mcp
+
+A significant share of that spend goes to **`Read` tokens for searching the codebase** — hunters and verifiers read broadly across files to trace flows and check upstream guards.
+
+If you want to reduce it, we strongly recommend running the audit alongside **[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)**. It serves structural code queries from a pre-built knowledge graph instead of raw file reads, which is exactly the pattern this skill hammers. **With codebase-memory-mcp in place, a `deep-code-audit` run uses 30%+ fewer tokens.**
+
 ## Installation
 
 The plugin ships two components, and **both must be loaded** for the skill to run at full capability: the skill itself (`skills/deep-code-audit/`) and the two dedicated subagents (`agents/deep-audit-hunter.md`, `agents/deep-audit-verifier.md`) that do the actual hunting and verification. Installing through the Claude Code plugin route loads both automatically — no separate wiring for `agents/` is needed.

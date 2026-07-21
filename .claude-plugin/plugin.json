@@ -1,7 +1,7 @@
 {
   "name": "deep-code-audit",
   "displayName": "Deep Code Audit",
-  "version": "26.07.18",
+  "version": "26.07.21",
   "description": "Multi-agent adversarial code audit: parallel hunters and fresh-context verifiers sweep a whole repository for security, concurrency, fault-handling, logic, and resource defects, then render a Korean-language report.",
   "author": {
     "name": "Youhyun Jung",
